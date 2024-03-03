@@ -254,10 +254,8 @@ register_backend_factory(
 
 
 def _check_cuda_compute_capability(devices_to_check):
-  from jaxlib.gpu_triton import get_compute_capability
-
   for idx in devices_to_check:
-    compute_cap = get_compute_capability(idx)
+    compute_cap = cuda_versions.cuda_compute_capability(idx)
     if compute_cap < MIN_COMPUTE_CAPABILITY:
       warnings.warn(
         f"Device {idx} has CUDA compute capability {compute_cap/10} which is "
