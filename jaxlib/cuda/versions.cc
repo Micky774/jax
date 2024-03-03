@@ -46,6 +46,7 @@ NB_MODULE(_versions, m) {
   m.def("cublas_get_version", &CublasGetVersion);
   m.def("cusparse_get_version", &CusparseGetVersion);
   m.def("cuda_compute_capability", &CudaComputeCapability);
+  m.def("cuda_device_count", &CudaDeviceCount);
 }
 
 }  // namespace
