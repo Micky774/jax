@@ -766,7 +766,7 @@ def make_array_from_single_device_arrays(
     >>> arr = jax.make_array_from_single_device_arrays(global_shape, sharding, arrays)
     >>> assert arr.shape == (8,8) # arr.shape is (8,8) regardless of jax.device_count()
 
-    When using multiple processes, a common data pipeling is to have data parallelism across devices,
+    When using multiple processes, a common data pipeline is to have data parallelism across devices,
     with each device receiving at least one example. In this case, the following recipe will use
     `make_array_from_single_device_arrays` to create a global jax.Array.
 
@@ -926,13 +926,12 @@ def _array_shard_arg(x, sharding):
 pxla.shard_arg_handlers[ArrayImpl] = _array_shard_arg
 
 
-def _array_global_result_handler(global_aval, out_sharding, committed,
-                                 is_out_sharding_from_xla):
+def _array_global_result_handler(global_aval, out_sharding, committed):
   if global_aval.dtype == dtypes.float0:
     return lambda _: np.zeros(global_aval.shape, dtypes.float0)  # type: ignore
   if dtypes.issubdtype(global_aval.dtype, dtypes.extended):
     return global_aval.dtype._rules.global_sharded_result_handler(
-        global_aval, out_sharding, committed, is_out_sharding_from_xla)
+        global_aval, out_sharding, committed)
   return xc.array_result_handler(
       global_aval, out_sharding, committed=committed, _skip_checks=True
   )

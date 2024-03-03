@@ -33,12 +33,6 @@ except Exception as exc:
   del _warn
 del _cloud_tpu_init
 
-# Confusingly there are two things named "config": the module and the class.
-# We want the exported object to be the class, so we first import the module
-# to make sure a later import doesn't overwrite the class.
-from jax import config as _config_module
-del _config_module
-
 # Force early import, allowing use of `jax.core` after importing `jax`.
 import jax.core as _core
 del _core
@@ -142,7 +136,7 @@ from jax._src.array import (
 )
 
 from jax._src.tree_util import (
-  tree_map as tree_map,
+  tree_map as _deprecated_tree_map,
   treedef_is_leaf as _deprecated_treedef_is_leaf,
   tree_flatten as _deprecated_tree_flatten,
   tree_leaves as _deprecated_tree_leaves,
@@ -182,6 +176,11 @@ from jax._src.array import Shard as Shard
 import jax.experimental.compilation_cache.compilation_cache as _ccache
 del _ccache
 
+# TODO(jakevdp): remove this when jax/config.py is removed.
+from jax._src.deprecations import register as _register_deprecation
+_register_deprecation("jax.config", "config-module")
+del _register_deprecation
+
 _deprecations = {
   # Added July 2022
   "treedef_is_leaf": (
@@ -189,24 +188,35 @@ _deprecations = {
     _deprecated_treedef_is_leaf
   ),
   "tree_flatten": (
-    "jax.tree_flatten is deprecated: use jax.tree.flatten.",
+    "jax.tree_flatten is deprecated: use jax.tree.flatten (jax v0.4.25 or newer) "
+    "or jax.tree_util.tree_flatten (any JAX version).",
     _deprecated_tree_flatten
   ),
   "tree_leaves": (
-    "jax.tree_leaves is deprecated: use jax.tree.leaves.",
+    "jax.tree_leaves is deprecated: use jax.tree.leaves (jax v0.4.25 or newer) "
+    "or jax.tree_util.tree_leaves (any JAX version).",
     _deprecated_tree_leaves
   ),
   "tree_structure": (
-    "jax.tree_structure is deprecated: use jax.tree.structure.",
+    "jax.tree_structure is deprecated: use jax.tree.structure (jax v0.4.25 or newer) "
+    "or jax.tree_util.tree_structure (any JAX version).",
     _deprecated_tree_structure
   ),
   "tree_transpose": (
-    "jax.tree_transpose is deprecated: use jax.tree.transpose.",
+    "jax.tree_transpose is deprecated: use jax.tree.transpose (jax v0.4.25 or newer) "
+    "or jax.tree_util.tree_transpose (any JAX version).",
     _deprecated_tree_transpose
   ),
   "tree_unflatten": (
-    "jax.tree_unflatten is deprecated: use jax.tree.unflatten.",
+    "jax.tree_unflatten is deprecated: use jax.tree.unflatten (jax v0.4.25 or newer) "
+    "or jax.tree_util.tree_unflatten (any JAX version).",
     _deprecated_tree_unflatten
+  ),
+  # Added Feb 28, 2024
+  "tree_map": (
+    "jax.tree_map is deprecated: use jax.tree.map (jax v0.4.25 or newer) "
+    "or jax.tree_util.tree_map (any JAX version).",
+    _deprecated_tree_map
   ),
 }
 
@@ -215,6 +225,7 @@ if _typing.TYPE_CHECKING:
   from jax._src.tree_util import treedef_is_leaf as treedef_is_leaf
   from jax._src.tree_util import tree_flatten as tree_flatten
   from jax._src.tree_util import tree_leaves as tree_leaves
+  from jax._src.tree_util import tree_map as tree_map
   from jax._src.tree_util import tree_structure as tree_structure
   from jax._src.tree_util import tree_transpose as tree_transpose
   from jax._src.tree_util import tree_unflatten as tree_unflatten

@@ -126,7 +126,7 @@ class XLACompatibleSharding(sharding.Sharding):
     try:
       return (are_op_shardings_equal(self._to_xla_hlo_sharding(ndim),
                                       other._to_xla_hlo_sharding(ndim))
-              and self._device_assignment == other._device_assignment and
+              and self._internal_device_list == other._internal_device_list and  # type: ignore
               self.memory_kind == other.memory_kind)
     # NotImplementedError is raised by PmapSharding because it can't lower
     # to OpSharding. So if `other` is a PmapSharding, default to a strict
@@ -1113,23 +1113,6 @@ class CanonicalizedParsedPartitionSpec(ParsedPartitionSpec):
             f"sync={self.sync})")
 
 
-def check_all_or_none_unspecified(axis_resources, name):
-  if not axis_resources:
-    return False
-  unspecified_count = 0
-  unspecified = is_unspecified(axis_resources[0])
-  for resource in axis_resources:
-    current_is_unspecified = is_unspecified(resource)
-    if current_is_unspecified:
-      unspecified_count += 1
-      assert unspecified_count == 1
-    if current_is_unspecified != unspecified:
-      raise ValueError(f'`pjit.UNSPECIFIED` exists in {name}. '
-                       f'Make sure that every entry in {name} is '
-                       '`pjit.UNSPECIFIED`.')
-  return unspecified
-
-
 def prepare_axis_resources(axis_resources,
                            arg_name,
                            allow_unconstrained_dims=False):
@@ -1137,9 +1120,6 @@ def prepare_axis_resources(axis_resources,
   entries, treedef = tree_util.tree_flatten(
       axis_resources, is_leaf=lambda x: x is None)
   what = f"{arg_name} leaf specifications"
-  # All entries should be specified or if unspecified then there should only
-  # be 1 entry for that since UNSPECIFIED is a private API.
-  check_all_or_none_unspecified(entries, arg_name)
 
   new_entries = []
   for entry in entries:
@@ -1238,7 +1218,7 @@ class ShardingContext:
   This context also uses the GSPMD partitioner.
   """
   num_devices: int
-  device_assignment: tuple[xc.Device] | None = None
+  device_assignment: tuple[xc.Device, ...] | None = None
 
   def __post_init__(self):
     if self.device_assignment is not None:

@@ -6,7 +6,17 @@ Best viewed [here](https://jax.readthedocs.io/en/latest/changelog.html).
 Remember to align the itemized text with the first line of an item within a list.
 -->
 
-## jax 0.4.25
+## jax 0.4.26
+
+* Deprecations
+  * {func}`jax.tree_map` is deprecated; use `jax.tree.map` instead, or for backward
+    compatibility with older JAX versions, use {func}`jax.tree_util.tree_map`.
+  * Passing arguments to {func}`jax.numpy.array_equal` and {func}`jax.numpy.array_equiv`
+    that cannot be converted to a JAX array now results in an exception.
+
+## jaxlib 0.4.26
+
+## jax 0.4.25 (Feb 26, 2024)
 
 * New Features
   * Added [CUDA Array
@@ -18,6 +28,17 @@ Remember to align the itemized text with the first line of an item within a list
   * {func}`jax.tree.transpose` (i.e. {func}`jax.tree_util.tree_transpose`) now accepts
     `inner_treedef=None`, in which case the inner treedef will be automatically inferred.
 
+* Changes
+  * Pallas now uses XLA instead of the Triton Python APIs to compile Triton
+    kernels. You can revert to the old behavior by setting the
+    `JAX_TRITON_COMPILE_VIA_XLA` environment variable to `"0"`.
+  * Several deprecated APIs in {mod}`jax.interpreters.xla` that were removed in v0.4.24
+    have been re-added in v0.4.25, including `backend_specific_translations`,
+    `translations`, `register_translation`, `xla_destructure`, `TranslationRule`,
+    `TranslationContext`, and `XLAOp`. These are still considered deprecated, and
+    will be removed again in the future when better replacements are available.
+    Refer to {jax-issue}`#19816` for discussion.
+
 * Deprecations & Removals
   * {func}`jax.numpy.linalg.solve` now shows a deprecation warning for batched 1D
     solves with `b.ndim > 1`. In the future these will be treated as batched 2D
@@ -25,8 +46,17 @@ Remember to align the itemized text with the first line of an item within a list
   * Conversion of a non-scalar array to a Python scalar now raises an error, regardless
     of the size of the array. Previously a deprecation warning was raised in the case of
     non-scalar arrays of size 1. This follows a similar deprecation in NumPy.
+  * The previously deprecated configuration APIs have been removed
+    following a standard 3 months deprecation cycle (see {ref}`api-compatibility`).
+    These include
+    * the `jax.config.config` object and
+    * the `define_*_state` and `DEFINE_*` methods of {data}`jax.config`.
+  * Importing the `jax.config` submodule via `import jax.config` is deprecated.
+    To configure JAX use `import jax` and then reference the config object
+    via `jax.config`.
+  * The minimum jaxlib version is now 0.4.20.
 
-## jaxlib 0.4.25
+## jaxlib 0.4.25 (Feb 26, 2024)
 
 ## jax 0.4.24 (Feb 6, 2024)
 

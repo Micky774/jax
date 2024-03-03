@@ -1006,6 +1006,8 @@ def convert_constvars_jaxpr(jaxpr: Jaxpr) -> Jaxpr:
 @weakref_lru_cache
 def convert_invars_to_constvars(jaxpr: Jaxpr, n: int) -> Jaxpr:
   """Move n invars to constvars. Like an inverse of convert_constvars_Jaxpr."""
+  if n == 0:
+    return jaxpr.replace()  # 'return jaxpr' would create cache reference cycle
   if any(isinstance(eff, effects.JaxprInputEffect) for eff in jaxpr.effects):
     raise NotImplementedError
   config.enable_checks.value and core.check_jaxpr(jaxpr)
@@ -1526,9 +1528,10 @@ def dce_jaxpr_consts(jaxpr: Jaxpr, used_outputs: Sequence[bool],
                      instantiate: bool | Sequence[bool] = False,
                      ) -> tuple[Jaxpr, list[bool], list[bool]]:
   jaxpr_ = convert_constvars_jaxpr(jaxpr)
-  new_jaxpr_, used_inputs_ = dce_jaxpr(jaxpr_, used_outputs)
+  new_jaxpr, used_inputs_ = dce_jaxpr(jaxpr_, used_outputs)
   used_consts, used_inputs = split_list(used_inputs_, [len(jaxpr.constvars)])
-  new_jaxpr = convert_invars_to_constvars(new_jaxpr_, sum(used_consts))
+  if sum(used_consts):
+    new_jaxpr = convert_invars_to_constvars(new_jaxpr, sum(used_consts))
   return new_jaxpr, used_consts, used_inputs
 
 
@@ -2725,6 +2728,13 @@ def call_padding_rule(prim, in_avals, out_avals, *args, call_jaxpr, **params):
   new_params = dict(params, call_jaxpr=padded_jaxpr)
   subfuns, bind_params = prim.get_bind_params(new_params)
   return prim.bind(*subfuns, *args, **bind_params)
+
+
+def _error_staging_mutable_array_p(trace, x):
+  raise Exception(
+      "mutable_array constructor can't be staged out, and in particular can't "
+      "be used under a jax.jit or jax.lax.scan")
+custom_staging_rules[core.mutable_array_p] = _error_staging_mutable_array_p
 
 
 # TODO(mattjj): the following are deprecated; update callers to _nounits version

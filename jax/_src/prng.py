@@ -36,6 +36,7 @@ from jax._src import pretty_printer as pp
 from jax._src import sharding_specs
 from jax._src import tree_util as tree_util_internal
 from jax._src import typing
+from jax._src import op_shardings
 from jax._src.api import jit, vmap
 from jax._src.dtypes import float0
 from jax._src.interpreters import ad
@@ -152,12 +153,14 @@ class PRNGKeyArray(jax.Array):
 
   _impl: PRNGImpl
   _base_array: typing.Array
+  _consumed: bool | np.ndarray  # Used in jax.experimental.key_reuse.
 
   def __init__(self, impl, key_data: Any):
     assert not isinstance(key_data, core.Tracer)
     _check_prng_key_data(impl, key_data)
     self._impl = impl
     self._base_array = key_data
+    self._consumed = False  # TODO(jakevdp): default to True here?
 
   def block_until_ready(self):
     _ = self._base_array.block_until_ready()
@@ -268,7 +271,9 @@ class PRNGKeyArray(jax.Array):
       pp.nest(2, pp.brk() + pp_keys + pp.brk() + pp_impl)))
 
   def copy(self):
-    return self.__class__(self._impl, self._base_array.copy())
+    out = self.__class__(self._impl, self._base_array.copy())
+    out._consumed = self._consumed  # TODO(jakevdp): is this correct?
+    return out
 
   __hash__ = None  # type: ignore[assignment]
   __array_priority__ = 100
@@ -317,7 +322,7 @@ def base_arr_shape_to_keys_shape(impl, base_arr_shape):
   base_ndim = len(impl.key_shape)
   return base_arr_shape[:-base_ndim]
 
-def make_key_array_phys_sharding(aval, sharding, is_sharding_from_xla):
+def make_key_array_phys_sharding(aval, sharding):
   if dispatch.is_single_device_sharding(sharding):
     return sharding
   elif isinstance(sharding, PmapSharding):
@@ -334,8 +339,6 @@ def make_key_array_phys_sharding(aval, sharding, is_sharding_from_xla):
     return NamedSharding(
         sharding.mesh,
         PartitionSpec(*sharding.spec, *trailing_spec))
-  elif is_sharding_from_xla:
-    return sharding
   else:
     hlos = sharding._to_xla_hlo_sharding(aval.ndim)
     return GSPMDSharding(
@@ -366,16 +369,19 @@ class KeyTyRules:
   @staticmethod
   def physical_hlo_sharding(aval, hlo_sharding: xc.HloSharding) -> xc.HloSharding:
     key_shape = aval.dtype._impl.key_shape
-    op_sharding_proto = hlo_sharding.to_proto()  # type: ignore
-    new_op_sharding = op_sharding_proto.clone()
-    tad = list(new_op_sharding.tile_assignment_dimensions)
-    suffix = [tad.pop()] if op_sharding_proto.replicate_on_last_tile_dim else []
-    tad.extend([1] * len(key_shape) + suffix)
+    new_op_sharding = hlo_sharding.to_proto().clone()  # type: ignore
+    partitions, num_replicas = op_shardings.get_num_ways_dim_sharded(
+        hlo_sharding)
+    suffix = [] if num_replicas == 1 else [num_replicas]
+    tad = partitions + [1] * len(key_shape) + suffix
     new_op_sharding.tile_assignment_dimensions = tad
     return xc.HloSharding.from_proto(new_op_sharding)
 
   @staticmethod
   def logical_op_sharding(aval, phys_sharding) -> XLACompatibleSharding:
+    # The trailing dims should always be replicated.
+    aval.dtype._rules.check_replicated_trailing_dims(phys_sharding, aval)
+
     if dispatch.is_single_device_sharding(phys_sharding):
       return phys_sharding
     elif isinstance(phys_sharding, PmapSharding):
@@ -392,11 +398,14 @@ class KeyTyRules:
           PartitionSpec(*phys_sharding.spec[:-len(key_shape)]))
     else:
       key_shape = aval.dtype._impl.key_shape
-      phys_op_sharding = phys_sharding._to_xla_hlo_sharding(
-          aval.ndim + len(key_shape)).to_proto()
-      logical_op_sharding = phys_op_sharding.clone()
-      tad = list(logical_op_sharding.tile_assignment_dimensions)
-      tad = tad[:-len(key_shape)]
+      phys_hlo_sharding = phys_sharding._to_xla_hlo_sharding(
+          aval.ndim + len(key_shape))
+      partitions, num_replicas = op_shardings.get_num_ways_dim_sharded(
+          phys_hlo_sharding)
+      suffix = [] if num_replicas == 1 else [num_replicas]
+      # Create logical sharding by cutting off the replicated trailing dims.
+      logical_op_sharding = phys_hlo_sharding.to_proto().clone()
+      tad = partitions[:-len(key_shape)] + suffix
       logical_op_sharding.tile_assignment_dimensions = tad
       return GSPMDSharding(phys_sharding._device_assignment,
                            xc.HloSharding.from_proto(logical_op_sharding))
@@ -416,8 +425,7 @@ class KeyTyRules:
 
     # set up a grounded sharding (with a grounded sharding spec)
     if isinstance(sharding, (PmapSharding, NamedSharding)):
-      phys_sharding = make_key_array_phys_sharding(
-          aval, sharding, is_sharding_from_xla=False)
+      phys_sharding = make_key_array_phys_sharding(aval, sharding)
     else:
       assert False, f'impossible sharding {sharding} in local sharded result handler'
 
@@ -435,15 +443,12 @@ class KeyTyRules:
     return handler
 
   @staticmethod
-  def global_sharded_result_handler(aval, out_sharding, committed,
-                                    is_out_sharding_from_xla):
+  def global_sharded_result_handler(aval, out_sharding, committed):
     phys_aval = core.physical_aval(aval)
     phys_handler_maker = pxla.global_result_handlers[core.ShapedArray]
 
-    phys_sharding = make_key_array_phys_sharding(
-        aval, out_sharding, is_out_sharding_from_xla)
-    phys_handler = phys_handler_maker(phys_aval, phys_sharding, committed,
-                                      is_out_sharding_from_xla)
+    phys_sharding = make_key_array_phys_sharding(aval, out_sharding)
+    phys_handler = phys_handler_maker(phys_aval, phys_sharding, committed)
     def handler(bufs):
       return PRNGKeyArray(aval.dtype._impl, phys_handler(bufs))
     return handler
@@ -454,8 +459,8 @@ class KeyTyRules:
     phys_handler_maker = pxla.global_result_handlers[core.ShapedArray]
     phys_arrays = [random_unwrap(arr) for arr in arrays]
 
-    phys_sharding = make_key_array_phys_sharding(aval, sharding, False)
-    phys_handler = phys_handler_maker(phys_aval, phys_sharding, committed, False)
+    phys_sharding = make_key_array_phys_sharding(aval, sharding)
+    phys_handler = phys_handler_maker(phys_aval, phys_sharding, committed)
     phys_result = phys_handler(phys_arrays)
     return PRNGKeyArray(aval.dtype._impl, phys_result)
 
@@ -463,7 +468,7 @@ class KeyTyRules:
   def device_put_sharded(vals, aval, sharding, devices):
     physical_aval = core.physical_aval(aval)
     physical_buffers = tree_util.tree_map(random_unwrap, vals)
-    physical_sharding = make_key_array_phys_sharding(aval, sharding, False)
+    physical_sharding = make_key_array_phys_sharding(aval, sharding)
     physical_result = pxla.batched_device_put(physical_aval, physical_sharding, physical_buffers, list(devices))
     return random_wrap(physical_result, impl=aval.dtype._impl)
 
@@ -472,9 +477,36 @@ class KeyTyRules:
     physical_aval = core.physical_aval(aval)
     assert len(xla.aval_to_xla_shapes(physical_aval)) == 1
     physical_buf = random_unwrap(val)
-    physical_sharding = make_key_array_phys_sharding(aval, sharding, False)
+    physical_sharding = make_key_array_phys_sharding(aval, sharding)
     physical_result = pxla.batched_device_put(physical_aval, physical_sharding, [physical_buf] * len(devices), devices)
     return random_wrap(physical_result, impl=aval.dtype._impl)
+
+  @staticmethod
+  def check_replicated_trailing_dims(sharding: XLACompatibleSharding, aval):
+    if isinstance(sharding, PmapSharding):
+      return
+    phys_aval = core.physical_aval(aval)
+    hlo_s = sharding._to_xla_hlo_sharding(phys_aval.ndim)
+    partitions, _ = op_shardings.get_num_ways_dim_sharded(hlo_s)
+    num_trailing_dims = phys_aval.ndim - aval.ndim
+    if not all(i == 1 for i in partitions[-num_trailing_dims:]):
+      raise AssertionError(
+          "The trailing dims of extended dtypes should be replicated. Got"
+          f" sharding: {sharding}, partitions: {partitions}, "
+          f"num_trailing_dims: {num_trailing_dims}")
+
+  @staticmethod
+  def replicate_trailing_dims(ctx, val: ir.Value, aval) -> ir.Value:
+    # Set the sharding of extended dtypes to be UNCONSTRAINED
+    # (i.e. XLA will choose) on aval.shape.
+    # For the trailing dims i.e. the dimension of key_shape on the base_array,
+    # the sharding is set to be REPLICATED always.
+    # For example: if the key.shape is (8, 2) and key_data(key).shape is (8, 2, 2),
+    # then the sharding will be P(P.UNCONSTRAINED, P.UNCONSTRAINED, None).
+    # The below custom call achieves the sharding like above example.
+    return mlir.wrap_with_sharding_op(
+        ctx, val, aval, xc.HloSharding.replicate().to_proto(),
+        unspecified_dims=set(range(aval.ndim)))
 
   @staticmethod
   def tangent_dtype(_):
@@ -522,7 +554,6 @@ class KeyTy(dtypes.ExtendedDType):
     return hash((self.__class__, self._impl))
 
 
-
 core.pytype_aval_mappings[PRNGKeyArray] = lambda x: x.aval
 xla.pytype_aval_mappings[PRNGKeyArray] = lambda x: x.aval
 
@@ -531,8 +562,7 @@ xla.canonicalize_dtype_handlers[PRNGKeyArray] = lambda x: x
 
 def key_array_shard_arg_handler(x: PRNGKeyArray, sharding):
   arr = x._base_array
-  phys_sharding = make_key_array_phys_sharding(
-      x.aval, sharding, is_sharding_from_xla=False)
+  phys_sharding = make_key_array_phys_sharding(x.aval, sharding)
   return pxla.shard_arg_handlers[type(arr)](arr, phys_sharding)
 
 

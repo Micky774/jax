@@ -1,17 +1,22 @@
 #include "jaxlib/gpu/triton_kernels.h"
 
 #include <algorithm>
-#include <cstdint>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
+#include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
 
 #include "absl/base/optimization.h"
+#include "absl/base/thread_annotations.h"
 #include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/check.h"
@@ -26,10 +31,8 @@
 #include "jaxlib/gpu/vendor.h"
 #include "xla/service/custom_call_status.h"
 #include "xla/stream_executor/gpu/asm_compiler.h"
-#include "tsl/platform/env.h"
 
 #define GPU_RETURN_IF_ERROR(expr) JAX_RETURN_IF_ERROR(JAX_AS_STATUS(expr))
-
 
 namespace jax::JAX_GPU_NAMESPACE {
 namespace {
@@ -82,9 +85,9 @@ absl::StatusOr<ModuleImage*> GetModuleImage(std::string kernel_name,
   auto it = module_images.find(key);
   if (it != module_images.end()) return it->second.get();
 
-#ifdef JAX_GPU_HIP //For HIP/ROCM just read the hsaco file
+#ifdef JAX_GPU_HIP  // For HIP/ROCM just read the hsaco file
   std::string result_blob;
-  std::string fname{ptx}; 
+  std::string fname{ptx};
   TF_RETURN_IF_ERROR(
       tsl::ReadFileToString(tsl::Env::Default(), fname, &result_blob));
   std::vector<uint8_t> module_image(result_blob.begin(), result_blob.end());
@@ -230,10 +233,10 @@ class ModuleImage {
     }
 
     if (shared_optin > kMaxStaticSharedMemBytes) {
-      #ifdef JAX_GPU_CUDA  
-        GPU_RETURN_IF_ERROR(
+#ifdef JAX_GPU_CUDA
+      GPU_RETURN_IF_ERROR(
           gpuFuncSetCacheConfig(function, CU_FUNC_CACHE_PREFER_SHARED));
-      #endif
+#endif
       int shared_total;
       GPU_RETURN_IF_ERROR(gpuDeviceGetAttribute(
           &shared_total,
@@ -241,11 +244,11 @@ class ModuleImage {
       int shared_static;
       GPU_RETURN_IF_ERROR(gpuFuncGetAttribute(
           &shared_static, GPU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, function));
-      #ifdef JAX_GPU_CUDA
-        GPU_RETURN_IF_ERROR(cuFuncSetAttribute(
+#ifdef JAX_GPU_CUDA
+      GPU_RETURN_IF_ERROR(cuFuncSetAttribute(
           function, GPU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
           shared_optin - shared_static));
-      #endif
+#endif
     }
     return function;
   }
@@ -257,7 +260,8 @@ class ModuleImage {
 
   absl::Mutex mutex_;
   std::vector<OwnedGPUmodule> modules_ ABSL_GUARDED_BY(mutex_);
-  absl::flat_hash_map<gpuContext_t, gpuFunction_t> functions_ ABSL_GUARDED_BY(mutex_);
+  absl::flat_hash_map<gpuContext_t, gpuFunction_t> functions_
+      ABSL_GUARDED_BY(mutex_);
 };
 
 Kernel::Kernel(std::string kernel_name, uint32_t num_warps,
@@ -536,23 +540,20 @@ jax_triton::TritonAutotunedKernelCall AutotunedKernelCall::ToProto() const {
 /*static*/ absl::StatusOr<KernelCall> AutotunedKernelCall::Autotune(
     AutotunedKernelCall kernel_call, gpuStream_t stream, void** buffers) {
   // Ensure a valid context for driver calls that don't take the stream.
-  //gpuContext_t context;
-  //GPU_RETURN_IF_ERROR(gpuStreamGetCtx(stream, &context));
-  //GPU_RETURN_IF_ERROR(gpuCtxPushCurrent(context));
-  //absl::Cleanup ctx_restorer = [] { gpuCtxPopCurrent(nullptr); };
+  // gpuContext_t context;
+  // GPU_RETURN_IF_ERROR(gpuStreamGetCtx(stream, &context));
+  // GPU_RETURN_IF_ERROR(gpuCtxPushCurrent(context));
+  // absl::Cleanup ctx_restorer = [] { gpuCtxPopCurrent(nullptr); };
 
+  // Autotuning is not supported if the the stream is in graph capture mode.
   gpustreamCaptureStatus_t capture_status;
   GPU_RETURN_IF_ERROR(gpuStreamIsCapturing(stream, &capture_status));
-  bool is_capturing = capture_status == GPU_STREAM_CAPTURE_STATUS_ACTIVE;
-
-  gpustreamCaptureMode_t capture_mode = GPU_STREAM_CAPTURE_MODE_RELAXED;
-  gpuStream_t autotune_stream = stream;
-
-  if (is_capturing) {
-    
-    GPU_RETURN_IF_ERROR(gpuThreadExchangeStreamCaptureMode(&capture_mode));
-    // Need a side stream so as not to interfere with graph capture.
-    GPU_RETURN_IF_ERROR(gpuStreamCreate(&autotune_stream, GPU_STREAM_NON_BLOCKING));
+  if (capture_status == GPU_STREAM_CAPTURE_STATUS_ACTIVE) {
+    return absl::FailedPreconditionError(
+        "Can't autotune Triton kernel when the stream is in graph capture "
+        "mode. Autotuning can rely on real data present in input buffers to "
+        "use them in address computation, but in graph capture mode buffers "
+        "can have arbitrary data");
   }
 
   // If an input aliases with an output, it will get overwritten during the
@@ -565,8 +566,7 @@ jax_triton::TritonAutotunedKernelCall AutotunedKernelCall::ToProto() const {
       std::vector<uint8_t> input_copy(size);
       GPU_RETURN_IF_ERROR(gpuMemcpyDtoHAsync(
           input_copy.data(),
-          reinterpret_cast<gpuDevicePtr_t>(buffers[input_idx]), size,
-          autotune_stream));
+          reinterpret_cast<gpuDevicePtr_t>(buffers[input_idx]), size, stream));
       input_copies[input_idx] = std::move(input_copy);
     }
   }
@@ -576,8 +576,8 @@ jax_triton::TritonAutotunedKernelCall AutotunedKernelCall::ToProto() const {
   // iterations to run for benchmarking.
   float best = std::numeric_limits<float>::infinity();
   for (Config& config : kernel_call.configs_) {
-    JAX_ASSIGN_OR_RETURN(
-        float t, Benchmark(autotune_stream, config.kernel_call, buffers, 1));
+    JAX_ASSIGN_OR_RETURN(float t,
+                         Benchmark(stream, config.kernel_call, buffers, 1));
     LOG(INFO) << config.description << ", ran 1 iter in " << t << " ms";
     best = std::min(best, t);
   }
@@ -593,7 +593,7 @@ jax_triton::TritonAutotunedKernelCall AutotunedKernelCall::ToProto() const {
   }
 
   best = std::numeric_limits<float>::infinity();
-  JAX_ASSIGN_OR_RETURN(gpuDevice_t device, GetStreamDevice(autotune_stream));
+  JAX_ASSIGN_OR_RETURN(gpuDevice_t device, GetStreamDevice(stream));
   for (Config& config : kernel_call.configs_) {
     if (!config.kernel_call.CanLaunchOnDevice(device)) {
       LOG(WARNING) << "Unable to launch autotune config on device: "
@@ -601,8 +601,8 @@ jax_triton::TritonAutotunedKernelCall AutotunedKernelCall::ToProto() const {
       continue;
     }
 
-    JAX_ASSIGN_OR_RETURN(float t, Benchmark(autotune_stream, config.kernel_call,
-                                            buffers, timed_iters));
+    JAX_ASSIGN_OR_RETURN(
+        float t, Benchmark(stream, config.kernel_call, buffers, timed_iters));
     LOG(INFO) << config.description << ", ran " << timed_iters << " iters in "
               << t << " ms";
 
@@ -623,18 +623,15 @@ jax_triton::TritonAutotunedKernelCall AutotunedKernelCall::ToProto() const {
 
   // Restore aliased inputs to their original values.
   for (auto [input_idx, _, size] : kernel_call.input_output_aliases_) {
-    GPU_RETURN_IF_ERROR(gpuMemcpyHtoDAsync(
-        reinterpret_cast<gpuDevicePtr_t>(buffers[input_idx]),
-        input_copies[input_idx].data(), size, autotune_stream));
+    GPU_RETURN_IF_ERROR(
+        gpuMemcpyHtoDAsync(reinterpret_cast<gpuDevicePtr_t>(buffers[input_idx]),
+                           input_copies[input_idx].data(), size, stream));
   }
+
   // Synchronize stream to ensure copies are complete before the host copy
   // is deleted.
-  GPU_RETURN_IF_ERROR(gpuStreamSynchronize(autotune_stream));
+  GPU_RETURN_IF_ERROR(gpuStreamSynchronize(stream));
 
-  if (is_capturing) {
-    GPU_RETURN_IF_ERROR(gpuStreamDestroy(autotune_stream));
-    GPU_RETURN_IF_ERROR(gpuThreadExchangeStreamCaptureMode(&capture_mode));
-  }
   return std::move(kernel_call.configs_[0].kernel_call);
 }
 

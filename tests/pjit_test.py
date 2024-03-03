@@ -376,7 +376,7 @@ class PJitTest(jtu.BufferDonationTestCase):
 
     @partial(pjit, out_shardings=s, donate_argnames='inp2')
     def f(inp1, inp2, inp3):
-      return jax.tree_map(lambda x, y, z: x + y + z, inp1, inp2, inp3)
+      return jax.tree.map(lambda x, y, z: x + y + z, inp1, inp2, inp3)
 
     x = np.ones((2, 5)) * 4
     x_tree = jax.device_put({"a": {"b": x}, "c": x}, s)
@@ -389,10 +389,10 @@ class PJitTest(jtu.BufferDonationTestCase):
 
     expected = x + y + z
     out = f(x_tree, inp2=y_tree, inp3=z_tree)
-    jax.tree_map(lambda o: self.assertAllClose(o, expected), out)
-    jax.tree_map(self.assertNotDeleted, x_tree)
-    jax.tree_map(self.assertDeleted, y_tree)
-    jax.tree_map(self.assertNotDeleted, z_tree)
+    jax.tree.map(lambda o: self.assertAllClose(o, expected), out)
+    jax.tree.map(self.assertNotDeleted, x_tree)
+    jax.tree.map(self.assertDeleted, y_tree)
+    jax.tree.map(self.assertNotDeleted, z_tree)
 
   @unittest.skipIf(xla_extension_version < 220, 'jaxlib version too old')
   @jtu.run_on_devices('tpu', 'cpu', 'gpu')
@@ -422,9 +422,9 @@ class PJitTest(jtu.BufferDonationTestCase):
     z_tree = jax.device_put({'a': {'b': z}, 'c': z}, s)
 
     out = f(x_tree, y_tree, z_tree)
-    jax.tree_map(self.assertNotDeleted, x_tree)
-    jax.tree_map(self.assertDeleted, y_tree)
-    jax.tree_map(self.assertDeleted, z_tree)
+    jax.tree.map(self.assertNotDeleted, x_tree)
+    jax.tree.map(self.assertDeleted, y_tree)
+    jax.tree.map(self.assertDeleted, z_tree)
 
   @unittest.skipIf(xla_extension_version < 220, 'jaxlib version too old')
   @jtu.run_on_devices('tpu')
@@ -559,8 +559,6 @@ class PJitTest(jtu.BufferDonationTestCase):
     # Annotations from with_sharding_constraint
     self.assertIn('sharding={devices=[2,1]<=[2]}', hlo.as_hlo_text())
     self.assertIn('sharding={devices=[2,1]<=[2]}', hlo.as_hlo_text())
-    # Annotation from pjit
-    self.assertIn("sharding={replicated}", hlo.as_hlo_text())
 
   def testShardingConstraintPyTreeWithUnconstrainedDimsWithJit(self):
 
@@ -1000,7 +998,7 @@ class PJitTest(jtu.BufferDonationTestCase):
 
     for obj in [lowered, compiled]:
       self.assertFalse(obj._no_kwargs)
-      self.assertEqual(obj.in_tree, jax.tree_util.tree_flatten(((0, 0), {}))[1])
+      self.assertEqual(obj.in_tree, jax.tree.flatten(((0, 0), {}))[1])
 
   @jtu.with_mesh([('x', 2), ('y', 2)])
   def testLowerCompileWithKwargs(self):
@@ -1334,7 +1332,7 @@ class CustomPartitionerTest(jtu.JaxTestCase):
     self.skip_if_custom_partitioning_not_supported()
 
     def partition(precision, mesh, arg_shapes, result_shape):
-      arg_shardings = jax.tree_map(lambda s: s.sharding, arg_shapes)
+      arg_shardings = jax.tree.map(lambda s: s.sharding, arg_shapes)
       result_sharding = result_shape[0].sharding
       self.assertEqual(arg_shardings[0], result_sharding)
       self.assertEqual(P('x', None), result_sharding.spec)
@@ -1351,7 +1349,7 @@ class CustomPartitionerTest(jtu.JaxTestCase):
       return mesh, lower_fn, (result_sharding, result_sharding), arg_shardings
 
     def infer_sharding_from_operands(precision, mesh, arg_shapes, result_shape):
-      arg_shardings = jax.tree_map(lambda s: s.sharding, arg_shapes)
+      arg_shardings = jax.tree.map(lambda s: s.sharding, arg_shapes)
       x_shard, y_shard = arg_shardings
       x_shape, y_shape = arg_shapes
       x_names = tuple(x_shard.spec) + tuple(
@@ -1718,19 +1716,16 @@ class ArrayPjitTest(jtu.JaxTestCase):
     input_shape = (8, 2)
     global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
     input_data = np.arange(
-        math.prod(input_shape), dtype=np.float32).reshape(input_shape)
-    with global_mesh:
-      f = pjit(lambda x: x,
-                out_shardings=NamedSharding(
-                    global_mesh, P('x', 'y')))
-      # Since no in_axis_resources is provided, pjit will assume that
-      # the numpy input is fully replicated over the mesh.
-      out = f(input_data)
-      self.assertIsInstance(out, array.ArrayImpl)
-      for s in out.addressable_shards:
-        self.assertEqual(s.data.shape, (2, 1))
-        self.assertArraysEqual(s.data, input_data[s.index])
-      self.assertArraysEqual(out._value, input_data)
+        math.prod(input_shape)).reshape(input_shape)
+
+    f = pjit(lambda x: x,
+              out_shardings=NamedSharding(global_mesh, P('x', 'y')))
+    out = f(input_data)
+    self.assertIsInstance(out, array.ArrayImpl)
+    self.assertArraysEqual(out, input_data)
+    for s in out.addressable_shards:
+      self.assertEqual(s.data.shape, (2, 1))
+      self.assertArraysEqual(s.data, input_data[s.index])
 
   def test_numpy_array_input(self):
     input_shape = (8, 2)
@@ -1799,7 +1794,7 @@ class ArrayPjitTest(jtu.JaxTestCase):
     def f(tree):
       return tree
     out_tree = f((a1 @ a1.T, (a2, (a3 * 2, a4))))
-    (out1, out2, out3, out4), _ = jax.tree_util.tree_flatten(out_tree)
+    (out1, out2, out3, out4), _ = jax.tree.flatten(out_tree)
 
     self.assertIsInstance(out1, array.ArrayImpl)
     self.assertEqual(out1.shape, (8, 8))
@@ -3816,6 +3811,96 @@ class ArrayPjitTest(jtu.JaxTestCase):
     self.assertEqual(out.sharding, s)
     self.assertArraysEqual(out, np_inp)
 
+  def test_mpmd_device_put_fast_path(self):
+    if jax.device_count() < 4:
+      self.skipTest('Needs >= 4 devices')
+
+    dev_count = jax.device_count()
+    mesh1 = jax.sharding.Mesh(jax.devices()[:dev_count//2], 'x')
+    mesh2 = jax.sharding.Mesh(jax.devices()[dev_count//2:], 'x')
+    inp = np.arange(8)
+    arr1 = jax.device_put(inp, NamedSharding(mesh1, P('x')))
+
+    # This is to prevent changes to shard_arg_handler of Array which checks for
+    # indices to take the fast path for resharding. Changes made to the handler
+    # to check for shardings instead of indices will cause this test to fail and
+    # that is expected.
+    with jtu.count_device_put_fast_path_hit() as count:
+      out = jax.device_put(arr1, NamedSharding(mesh2, P('x')))
+    self.assertEqual(count[0], 1)
+    self.assertTupleEqual(out.sharding._device_assignment,
+                          mesh2._flat_devices_tuple)
+    self.assertArraysEqual(out, inp)
+
+  def test_prng_sharding_propagation(self):
+    input_shape = (8, 2)
+    mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    spec = P('x', 'y')
+
+    seeds, _ = create_array(input_shape, mesh, spec, dtype=np.uint32)
+
+    @jax.jit
+    def make_keys(seeds):
+      make_key = partial(prng.random_seed, impl=prng.threefry_prng_impl)
+      key = make_key(seeds)
+      return key.T
+
+    out = make_keys(seeds)
+    self.assertEqual(out.sharding, NamedSharding(mesh, P('y', 'x')))
+
+    base_array = jax.random.key_data(out)
+    self.assertEqual(base_array.shape, (2, 8, 2))
+    self.assertEqual(base_array.sharding, NamedSharding(mesh, P('y', 'x', None)))
+
+    lowered_text = make_keys.lower(seeds).as_text()
+    self.assertIn('unspecified_dims=[0,1]', lowered_text)
+
+  def test_prng_sharding_propagation_with_nested_jit(self):
+    input_shape = (8, 2)
+    mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    spec = P('x', 'y')
+
+    seeds, _ = create_array(input_shape, mesh, spec, dtype=np.uint32)
+
+    @jax.jit
+    def make_keys(seeds):
+      @partial(jax.jit, out_shardings=NamedSharding(mesh, P('y')))
+      def f():
+        make_key = partial(prng.random_seed, impl=prng.threefry_prng_impl)
+        return make_key(seeds)
+      x = f()
+      return x.T
+
+    out = make_keys(seeds)
+    self.assertEqual(out.sharding, NamedSharding(mesh, P(None, 'y')))
+
+    base_array = jax.random.key_data(out)
+    self.assertEqual(base_array.shape, (2, 8, 2))
+    self.assertEqual(base_array.sharding, NamedSharding(mesh, P(None, 'y', None)))
+
+    lowered_text = make_keys.lower(seeds).as_text()
+    self.assertIn('unspecified_dims=[0,1]', lowered_text)
+
+  def test_jit_partially_specified_shardings(self):
+    mesh = jtu.create_global_mesh((2, 2), ('x', 'y'))
+    np_inp = np.arange(16).reshape(8, 2)
+    s = NamedSharding(mesh, P('x', 'y'))
+    s2 = NamedSharding(mesh, P('x'))
+    arr = jax.device_put(np_inp, s)
+    arr2 = jax.device_put(np_inp, s2)
+
+    @partial(jax.jit, in_shardings=(s, None, s2, UNSPECIFIED, UNSPECIFIED),
+             out_shardings=(s2, None, None, s, None))
+    def f(x, y, z, a, b):
+      return x * 2, y @ y.T, z ** 2, a * 3, b.T
+
+    out1, out2, out3, out4, out5 = f(arr, np_inp, arr2, np_inp, arr)
+    self.assertArraysEqual(out1, np_inp * 2)
+    self.assertArraysEqual(out2, np_inp @ np_inp.T)
+    self.assertArraysEqual(out3, np_inp ** 2)
+    self.assertArraysEqual(out4, np_inp * 3)
+    self.assertArraysEqual(out5, np_inp.T)
+
 
 class TempSharding(Sharding):
 
@@ -4248,24 +4333,6 @@ class UtilTest(jtu.JaxTestCase):
     self.assertEqual(
         sharding_impls.array_mapping_to_axis_resources(inp), expected_out
     )
-
-  @parameterized.named_parameters(
-      ("all_unspecified", (UNSPECIFIED, UNSPECIFIED), AssertionError),
-      ("only_unspecified", UNSPECIFIED),
-      ("all_specified", (P('x'), P('y'))),
-      ("only_specified", P('x')),
-      ("mix_1", (P('x'), UNSPECIFIED), ValueError),
-      ("mix_2", (P('x'), UNSPECIFIED, P('y')), ValueError),
-      ("mix_3", (UNSPECIFIED, P('x'), P('y')), ValueError),
-      ("mix_4", (UNSPECIFIED, P('x'), UNSPECIFIED), ValueError),
-  )
-  def test_all_or_non_unspecified(self, axis_resources, error=None):
-    entries, _ = jax.tree_util.tree_flatten(axis_resources, is_leaf=lambda x: x is None)
-    if error is not None:
-      with self.assertRaises(error):
-        sharding_impls.check_all_or_none_unspecified(entries, 'test axis resources')
-    else:
-      sharding_impls.check_all_or_none_unspecified(entries, 'test axis resources')
 
   def test_op_sharding_equality_and_hash_equality(self):
     op1 = xc.OpSharding()

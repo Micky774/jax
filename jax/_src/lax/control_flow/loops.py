@@ -739,7 +739,7 @@ def _maybe_put(x):
   else:
     return x
 
-def _scan_transpose(reduce_axes, cts, *args, reverse, length, num_consts,
+def _scan_transpose(cts, *args, reverse, length, num_consts,
                     num_carry, jaxpr, linear, unroll):
   # we've only implemented transposing scans with specific lin/nonlin patterns
   consts_lin, init_lin, xs_lin = split_list(linear, [num_consts, num_carry])
@@ -769,8 +769,7 @@ def _scan_transpose(reduce_axes, cts, *args, reverse, length, num_consts,
   #       jaxpr :: [ires, T d] -> [T c] -> [T a, eres] -> ([T c], [T b])
   # jaxpr_trans :: [ires] -> [CT d, CT c] -> [CT b, eres] -> ([CT d, CT c], [CT a])
   jaxpr_trans, attrs_tracked = _transpose_scan_jaxpr(
-      jaxpr, num_ires, num_consts - num_ires, num_eres, reduce_axes,
-      ct_ys_is_zeros)
+      jaxpr, num_ires, num_consts - num_ires, num_eres, ct_ys_is_zeros)
   linear_trans = ([False] * num_ires + [False] * len(attrs_tracked) +
                   [True] * (len(ct_consts) + len(ct_carry) + len(ct_ys)) +
                   [False] * num_eres)
@@ -790,7 +789,7 @@ def _scan_transpose(reduce_axes, cts, *args, reverse, length, num_consts,
 # transpose_scan_jaxpr :: ([res1, c, a, res2] -> b)
 #                         -> ([res1, CT c, CT b, res2] -> [CT c, CT a])
 @weakref_lru_cache
-def _transpose_scan_jaxpr(jaxpr, num_res1, num_c, num_res2, reduce_axes,
+def _transpose_scan_jaxpr(jaxpr, num_res1, num_c, num_res2,
                           ct_ys_is_zeros):
   num_a = len(jaxpr.in_avals) - num_res1 - num_c - num_res2
   # TODO: allow input cotangent avals to be batched relative to jaxpr.in_avals
@@ -820,7 +819,7 @@ def _transpose_scan_jaxpr(jaxpr, num_res1, num_c, num_res2, reduce_axes,
     primals = (res1 + [ad.UndefinedPrimal(aval) for aval in c_avals] +
                [ad.UndefinedPrimal(aval) for aval in a_avals] + res2)
     cbar_abar = ad.backward_pass(
-        jaxpr.jaxpr, reduce_axes, False, jaxpr.consts, primals, b_bar + ys_bar)
+        jaxpr.jaxpr, False, jaxpr.consts, primals, b_bar + ys_bar)
     _, new_c_bar, a_bar, _ = split_list(cbar_abar, [num_res1, num_c, num_a])
     a_bar = _map(ad.instantiate_zeros, a_bar)
     c_bar = _map(ad.instantiate_zeros, _map(ad.add_tangents, c_bar, new_c_bar))
@@ -1662,7 +1661,7 @@ def _while_lowering(ctx, *args, cond_jaxpr, body_jaxpr, cond_nconsts,
 
   # Loop condition
   cond_block = while_op.regions[0].blocks.append(*flat_loop_carry_types)
-  name_stack = ctx.module_context.name_stack.extend('while')
+  name_stack = ctx.name_stack.extend('while')
   with ir.InsertionPoint(cond_block):
     flat_cond_args = [
         cond_block.arguments[i] for i in range(len(flat_loop_carry_types))
@@ -1671,13 +1670,14 @@ def _while_lowering(ctx, *args, cond_jaxpr, body_jaxpr, cond_nconsts,
     # Remove tokens from cond args
     cond_args = cond_args[num_tokens:]
     x, _, z = util.split_list(cond_args, [cond_nconsts, body_nconsts])
-    cond_ctx = ctx.module_context.replace(name_stack=name_stack.extend('cond'))
     cond_consts = [
         mlir.ir_constants(xla.canonicalize_dtype(x)) for x in cond_jaxpr.consts
     ]
+    cond_name_stack = name_stack.extend('cond')
     ((pred,),), _ = mlir.jaxpr_subcomp(
-        cond_ctx,
+        ctx.module_context,
         cond_jaxpr.jaxpr,
+        cond_name_stack,
         mlir.TokenSet(),
         cond_consts,
         *(x + z),
@@ -1686,6 +1686,7 @@ def _while_lowering(ctx, *args, cond_jaxpr, body_jaxpr, cond_nconsts,
     if batched:
       pred_ctx = mlir.LoweringRuleContext(
           module_context=ctx.module_context,
+          name_stack=cond_name_stack,
           primitive=None,
           avals_in=[pred_aval],
           avals_out=[pred_aval.update(shape=())],
@@ -1710,20 +1711,21 @@ def _while_lowering(ctx, *args, cond_jaxpr, body_jaxpr, cond_nconsts,
     token_args, body_args = util.split_list(body_args, [num_tokens])
     tokens_in = mlir.TokenSet(zip(body_effects, token_args))
     x, y, z = util.split_list(body_args, [cond_nconsts, body_nconsts])
-    body_ctx = ctx.module_context.replace(name_stack=name_stack.extend('body'))
+    body_name_stack = name_stack.extend('body')
     body_consts = [mlir.ir_constants(xla.canonicalize_dtype(x))
                    for x in body_jaxpr.consts]
-    new_z, tokens_out = mlir.jaxpr_subcomp(body_ctx, body_jaxpr.jaxpr,
+    new_z, tokens_out = mlir.jaxpr_subcomp(
+        ctx.module_context, body_jaxpr.jaxpr, body_name_stack,
         tokens_in, body_consts, *(y + z), dim_var_values=ctx.dim_var_values)
     out_tokens = [tokens_out.get(eff) for eff in body_effects]
     if batched:
-      body_pred_ctx = ctx.module_context.replace(
-          name_stack=name_stack.extend('body_pred'))
+      body_pred_name_stack = name_stack.extend('body_pred')
       cond_consts = [mlir.ir_constants(xla.canonicalize_dtype(x))
                      for x in cond_jaxpr.consts]
       ((body_pred,),), _ = mlir.jaxpr_subcomp(
-          body_pred_ctx, cond_jaxpr.jaxpr, mlir.TokenSet(),
-          cond_consts, *(x + z), dim_var_values=ctx.dim_var_values)
+          ctx.module_context, cond_jaxpr.jaxpr, body_pred_name_stack,
+          mlir.TokenSet(), cond_consts, *(x + z),
+          dim_var_values=ctx.dim_var_values)
       new_z = _map(
           partial(_pred_bcast_select_hlo, ctx, pred_aval, body_pred), new_z, z,
           body_jaxpr.out_avals)
@@ -2232,7 +2234,9 @@ def cumlogsumexp(operand: Array, axis: int = 0, reverse: bool = False) -> Array:
   return cumlogsumexp_p.bind(operand, axis=int(axis), reverse=bool(reverse))
 
 def _cumred_shape_rule(x, *, axis: int, reverse: bool):
-  if axis < 0 or axis >= x.ndim:
+  if axis < 0:
+    raise ValueError("XLA operations do not allow negative axes")
+  elif axis >= x.ndim:
     raise ValueError(
         f"axis {axis} is out of bounds for array of shape {x.shape}")
   return x.shape

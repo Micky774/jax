@@ -42,7 +42,6 @@ import jax.ops
 from jax import lax
 from jax import numpy as jnp
 from jax.sharding import SingleDeviceSharding
-from jax import tree_util
 from jax.test_util import check_grads
 
 from jax._src import array
@@ -51,7 +50,6 @@ from jax._src import core
 from jax._src import dtypes
 from jax._src import test_util as jtu
 from jax._src.lax import lax as lax_internal
-from jax._src.lib import xla_extension_version
 from jax._src.numpy.util import _parse_numpydoc, ParsedDoc, implements
 from jax._src.util import safe_zip, NumpyComplexWarning
 
@@ -972,7 +970,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
   )
   def testPad(self, shape, dtype, mode, pad_width, constant_values):
     if np.issubdtype(dtype, np.unsignedinteger):
-      constant_values = tree_util.tree_map(abs, constant_values)
+      constant_values = jax.tree.map(abs, constant_values)
     rng = jtu.rand_default(self.rng())
     args_maker = lambda: [rng(shape, dtype)]
     if constant_values is None:
@@ -3533,6 +3531,10 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
         self.assertTrue(jnp.all(jnp.equal(result_np, result_jax)))
         self.assertTrue(jnp.all(jnp.equal(result_np, result_jit)))
 
+    self.assertEqual(np.isclose(6, 10, rtol=0.5), jnp.isclose(6, 10, rtol=0.5))
+    key = jax.random.key(0)
+    self.assertTrue(jnp.isclose(key, key))
+
   @jtu.sample_product(
     x=[1, [1], [1, 1 + 1E-4], [1, np.nan]],
     y=[1, [1], [1, 1 + 1E-4], [1, np.nan]],
@@ -3787,7 +3789,6 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self._CheckAgainstNumpy(np_op, jnp_op, args_maker)
     self._CompileAndCheck(jnp_op, args_maker)
 
-  @unittest.skipIf(xla_extension_version < 210, 'jaxlib version too old')
   def testAstypeInt4(self):
     # Test converting from int4 to int8
     x = np.array([1, -2, -3, 4, -8, 7], dtype=jnp.int4)
@@ -4395,8 +4396,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     self._CompileAndCheck(jnp_fun, args_maker)
 
   @jtu.sample_product(
-    shape=all_shapes,
-    dtype=all_dtypes,
+    shape=all_shapes, dtype=all_dtypes,
   )
   def testWhereOneArgument(self, shape, dtype):
     rng = jtu.rand_some_zero(self.rng())
@@ -4427,6 +4427,22 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     with jtu.strict_promotion_if_dtypes_match(dtypes):
       self._CheckAgainstNumpy(np_fun, jnp.where, args_maker)
       self._CompileAndCheck(jnp.where, args_maker)
+
+  def testWhereExtraCode(self):
+    def f(x):
+      return jnp.where(x > 0, x, -x)
+
+    # Test no comparison literal True/False in jaxpr, and hence no comparison to
+    # literals
+    jaxpr = jax.make_jaxpr(jax.grad(f))(3.)
+    self.assertNotIn('False', str(jaxpr))
+    self.assertNotIn('True', str(jaxpr))
+
+    # But if we set the option off, we get the old behavior.
+    with config.new_select_transpose(False):
+      jaxpr = jax.make_jaxpr(jax.grad(f))(3.)
+    self.assertIn('False', str(jaxpr))
+    self.assertIn('True', str(jaxpr))
 
   def testWhereScalarPromotion(self):
     x = jnp.where(jnp.array([True, False]), 3,

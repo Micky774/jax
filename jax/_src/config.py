@@ -23,7 +23,6 @@ import os
 import sys
 import threading
 from typing import Any, Callable, Generic, NamedTuple, NoReturn, TypeVar, cast
-import warnings
 
 from jax._src import lib
 from jax._src.lib import jax_jit
@@ -70,23 +69,6 @@ UPGRADE_BOOL_HELP = (
 UPGRADE_BOOL_EXTRA_DESC = " (transient)"
 
 
-_CONFIG_DEPRECATIONS = {
-    # Added October 26, 2023:
-    "check_exists",
-    "DEFINE_bool",
-    "DEFINE_integer",
-    "DEFINE_float",
-    "DEFINE_string",
-    "DEFINE_enum",
-    "define_bool_state",
-    "define_enum_state",
-    "define_int_state",
-    "define_float_state",
-    "define_string_state",
-    "define_string_or_object_state",
-}
-
-
 class Config:
   _HAS_DYNAMIC_ATTRIBUTES = True
 
@@ -99,20 +81,6 @@ class Config:
     self.meta = {}
     self.use_absl = False
     self._contextmanager_flags = set()
-
-  def __getattr__(self, name):
-    fn = None
-    if name in _CONFIG_DEPRECATIONS:
-      fn = globals().get(name, None)
-    if fn is None:
-      raise AttributeError(
-          f"'{type(self).__name__!r} object has no attribute {name!r}")
-    message = (
-        f"jax.config.{name} is deprecated. Please use other libraries "
-        "for configuration instead."
-    )
-    warnings.warn(message, DeprecationWarning, stacklevel=2)
-    return fn
 
   def update(self, name, val):
     if name not in self._value_holders:
@@ -243,6 +211,7 @@ def trace_context():
           default_device.value, random_seed_offset.value,
           threefry_partitionable.value,
           softmax_custom_jvp.value,
+          new_select_transpose.value,
           enable_memories.value,
           disable_jit.value,
           jax_xla_profile_version.value,
@@ -408,6 +377,7 @@ def define_bool_state(
   """
   if not isinstance(default, bool):
     raise TypeError(f"Default value must be of type bool, got {default}")
+  default = bool_env(name.upper(), default)
   name = name.lower()
   if upgrade:
     help += ' ' + UPGRADE_BOOL_HELP
@@ -835,6 +805,7 @@ class _GlobalExtraJitContext(NamedTuple):
   random_seed_offset: int = 0
   threefry_partitionable: bool = False
   softmax_custom_jvp: bool = False
+  new_select_transpose: bool = False
   xla_profile_version: int = 0
 
 
@@ -856,14 +827,21 @@ class _ThreadLocalExtraJitContext(NamedTuple):
   dynamic_trace_state: Any | None = None
   axis_env_state: Hashable = ()
   mesh_context_manager: Hashable = ()
+
+  # Values set by _StateContextManager context managers.
+  # CAUTION: these must be initialized to `None`! The state context manager
+  # restores these to None on exit. If the object default is not `None`, the
+  # context manager is not a no-op, which leads to problems with stale state
+  # (e.g. spurious cache misses in tests).
   numpy_rank_promotion: str | None = None
   numpy_dtype_promotion: str | None = None
   default_matmul_precision: Any | None = None
-  dynamic_shapes: bool = False
-  random_seed_offset: int = 0
-  threefry_partitionable: bool = False
-  softmax_custom_jvp: bool = False
-  xla_profile_version: int = 0
+  dynamic_shapes: bool | None = None
+  random_seed_offset: int | None = None
+  threefry_partitionable: bool | None = None
+  softmax_custom_jvp: bool | None = None
+  new_select_transpose: bool | None = None
+  xla_profile_version: int | None = None
 
 
 class _ThreadLocalStateCache(threading.local):
@@ -957,8 +935,11 @@ enable_checks = define_bool_state(
 enable_key_reuse_checks = define_bool_state(
     name='jax_enable_key_reuse_checks',
     default=False,
-    help="Turn on experimental key reuse checking."
-)
+    help=('Turn on experimental key reuse checking. With this configuration enabled,'
+          ' typed PRNG keys (i.e. keys created with jax.random.key()) will have their'
+          ' usage tracked, and incorrect reuse of a previously-used key will lead to'
+          ' an error. Currently enabling this leads to a small Python overhead on'
+          ' every call to a JIT-compiled function with keys as inputs or outputs.'))
 
 check_tracer_leaks = define_bool_state(
     name='jax_check_tracer_leaks',
@@ -1102,7 +1083,7 @@ threefry_partitionable = define_bool_state(
     update_thread_local_hook=lambda val: update_thread_local_jit_state(
         threefry_partitionable=val))
 
-
+# TODO(mattjj): set default True then remove this flag (or die trying)
 softmax_custom_jvp = define_bool_state(
     name='jax_softmax_custom_jvp',
     default=False,
@@ -1114,6 +1095,18 @@ softmax_custom_jvp = define_bool_state(
         softmax_custom_jvp=val),
     update_thread_local_hook=lambda val: update_thread_local_jit_state(
         softmax_custom_jvp=val))
+
+
+# TODO(mattjj): remove this flag
+new_select_transpose = define_bool_state(
+    name='new_select_transpose',
+    default=True,
+    upgrade=True,
+    help=('Change select_n_p transpose rule to specialize on bools'),
+    update_global_hook=lambda val: _update_global_jit_state(
+        new_select_transpose=val),
+    update_thread_local_hook=lambda val: update_thread_local_jit_state(
+        new_select_transpose=val))
 
 
 enable_custom_vjp_by_custom_transpose = define_bool_state(
@@ -1406,7 +1399,7 @@ dynamic_shapes = define_bool_state(
 # TODO(parkers): Remove if there are no complaints.
 remat_opt_barrier = define_bool_state(
     name='jax_remat_opt_barrier',
-    default=(lib.version >= (0, 3, 6)),
+    default=True,
     help=('Enables using optimization-barrier op for lowering remat.'))
 
 # TODO(sharadmv,mattjj): set default to True, then remove

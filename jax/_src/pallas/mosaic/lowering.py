@@ -157,7 +157,7 @@ def ir_constant(x, mlir_type=None):
       x = np.array(x, np.float32)
   if not mlir_type:
     mlir_type = _dtype_to_ir_type(x.dtype)
-  if isinstance(x, int) or x.dtype == np.int32 or x.dtype == np.uint32:
+  if isinstance(x, int) or x.dtype in (np.int32, np.uint32, np.int8):
     return arith.ConstantOp(mlir_type, ir.IntegerAttr.get(mlir_type, int(x))
                             ).result
   elif isinstance(x, float) or x.dtype == np.float32:
@@ -740,7 +740,7 @@ def _maybe_cast_to_index(cast_to_index, x):
     return _make_index(x)
   return _ensure_mlir_value(x, aval=jax_core.ShapedArray((), jnp.int32))
 
-def _index_to_start_size(idx: tuple[indexing.Slice | int | ir.Value],
+def _index_to_start_size(idx: tuple[indexing.Slice | int | ir.Value, ...],
                          cast_to_index: bool) -> tuple[ir.Value, int, bool]:
   assert not isinstance(idx, slice)
   if isinstance(idx, indexing.Slice):
@@ -1858,6 +1858,11 @@ def _program_id_lowering_rule(ctx: LoweringRuleContext, *, axis: int):
     )
   return ctx.lowering_context.grid_indices[axis]
 lowering_rules[primitives.program_id_p] = _program_id_lowering_rule
+
+def _num_programs_lowering_rule(ctx: LoweringRuleContext, *, axis: int):
+  del ctx
+  return tpu.iteration_bound(axis)
+lowering_rules[primitives.num_programs_p] = _num_programs_lowering_rule
 
 
 def _repeat_lowering_rule(ctx: LoweringRuleContext, x, *, repeats, axis):

@@ -436,6 +436,8 @@ def export(fun_jax: Callable,
       mlir_module = lowering.stablehlo()
 
       args_avals_flat, _ = tree_util.tree_flatten(lowered.in_avals)
+      if "out_mut" in lowering.compile_args:
+        if lowering.compile_args["out_mut"]: raise NotImplementedError
       if "kept_var_idx" in lowering.compile_args:
         module_kept_var_idx = tuple(sorted(lowering.compile_args["kept_var_idx"]))
       else:
@@ -676,14 +678,14 @@ def _wrap_main_func(
       module_context = mlir.ModuleContext(
           backend_or_name="cpu", platforms=["cpu"],
           axis_context=sharding_impls.ShardingContext(0),
-          name_stack=source_info_util.new_name_stack(),
           keepalives=[], channel_iterator=itertools.count(1),
           host_callbacks=[], module=wrapped_module, context=context,
           lowering_parameters=mlir.LoweringParameters(
             global_constant_computation=True
           ))
       ctx = mlir.LoweringRuleContext(
-        module_context=module_context, primitive=None,
+        module_context=module_context,
+        name_stack=source_info_util.new_name_stack(), primitive=None,
         avals_in=args_avals_flat, avals_out=None,
         tokens_in=mlir.TokenSet(), tokens_out=None)
       # We compute dim_values from the array arguments.
@@ -745,7 +747,7 @@ def _check_lowering(lowering) -> None:
   allowed_compile_args = [
       "backend", "mesh", "global_in_avals",
       "global_out_avals", "in_shardings", "out_shardings", "kept_var_idx",
-      "spmd_lowering", "auto_spmd_lowering",
+      "out_mut", "spmd_lowering", "auto_spmd_lowering",
       "tuple_args", "ordered_effects", "unordered_effects",
       "keepalive", "host_callbacks", "pmap_nreps", "committed",
       "device_assignment", "jaxpr_debug_info", "shape_poly_state",

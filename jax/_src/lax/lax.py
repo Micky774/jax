@@ -1837,13 +1837,51 @@ def logistic_impl(x):
 mlir.register_lowering(logistic_p,
                        mlir.lower_fun(logistic_impl, multiple_results=False))
 
+def _sin_complex(x):
+  # use expm1 instead of exp to avoid cancellation when abs(x) is small
+  # relies on the quality of real-valued expm1, sin, cos
+  # sin(x) = complex(sin(real(x)) * cosh(imag(x)), cos(real(x)) * sinh(imag(x)))
+  # 2 * sinh(x) = exp(x) - 1 - (exp(-x) - 1) = expm1(x) - expm1(-x)
+  # 2 * cosh(x) = exp(x) - 1 + (exp(-x) - 1) + 2 = expm1(x) + expm1(-x) + 2
+  a, b = real(x), imag(x)
+  a_is_zero = eq(a, _const(a, 0))
+  sn, cs = sin(a), cos(a)
+  e1m, e2m = expm1(b), expm1(-b)
+  snh, csh = (e1m - e2m) / 2, (e1m + e2m + 2) / 2
+  re, im = sn * csh, cs * snh
+  # avoid nan value when real(x) is zero and abs(x) is so large that abs(expm1(x)) is inf
+  return select(a_is_zero, complex(_const(a, 0), im), complex(re, im))
+
+def _sin_lowering(ctx, x):
+  if dtypes.issubdtype(ctx.avals_in[0].dtype, np.complexfloating):
+    sine = mlir.lower_fun(_sin_complex, multiple_results=False)
+    return sine(ctx, x)
+  return _nary_lower_hlo(hlo.sine, ctx, x)
+
 sin_p = standard_unop(_float | _complex, 'sin')
 ad.defjvp(sin_p, lambda g, x: mul(g, cos(x)))
-mlir.register_lowering(sin_p, partial(_nary_lower_hlo, hlo.sine))
+mlir.register_lowering(sin_p, _sin_lowering)
+
+def _cos_complex(x):
+  # cos(x) = complex(cos(real(x)) * cosh(imag(x)), -sin(real(x)) * sinh(imag(x)))
+  # see also _sin_complex
+  a, b = real(x), imag(x)
+  a_is_zero = eq(a, _const(a, 0))
+  sn, cs = sin(a), cos(a)
+  e1m, e2m = expm1(b), expm1(-b)
+  snh, csh = (e1m - e2m) / 2, (e1m + e2m + 2) / 2
+  re, im = cs * csh, -sn * snh
+  return select(a_is_zero, complex(re, _const(a, 0)), complex(re, im))
+
+def _cos_lowering(ctx, x):
+  if dtypes.issubdtype(ctx.avals_in[0].dtype, np.complexfloating):
+    cosine = mlir.lower_fun(_cos_complex, multiple_results=False)
+    return cosine(ctx, x)
+  return _nary_lower_hlo(hlo.cosine, ctx, x)
 
 cos_p = standard_unop(_float | _complex, 'cos')
 ad.defjvp(cos_p, lambda g, x: neg(mul(g, sin(x))))
-mlir.register_lowering(cos_p, partial(_nary_lower_hlo, hlo.cosine))
+mlir.register_lowering(cos_p, _cos_lowering)
 
 @_upcast_fp16_for_computation
 def _tan_impl(x):
@@ -2087,14 +2125,20 @@ def _integer_pow(x, *, y):
 
 
 def _integer_pow_lowering(ctx, x, *, y):
-  lowering = mlir.lower_fun(_integer_pow, multiple_results=False)
-  # TODO(b/217551391): emitting an out-of-line call leads to a large
-  # expansion when the MLIR is lowered to HLO, because the HLO lowering
-  # clones the callee. Consider unconditionally caching when the MLIR->HLO
-  # lowering doesn't expand the program.
-  if y >= 4:
+  # These cases are subsumed by the general case, but it's faster to emit these
+  # common cases directly.
+  if y == 2:
+    return (hlo.multiply(x, x),)
+  elif y == 3:
+    return (hlo.multiply(hlo.multiply(x, x), x),)
+  else:
+    lowering = mlir.lower_fun(_integer_pow, multiple_results=False)
+    # TODO(b/217551391): emitting an out-of-line call leads to a large
+    # expansion when the MLIR is lowered to HLO, because the HLO lowering
+    # clones the callee. Consider unconditionally caching when the MLIR->HLO
+    # lowering doesn't expand the program.
     lowering = mlir.cache_lowering(lowering)
-  return lowering(ctx, x, y=y)
+    return lowering(ctx, x, y=y)
 
 mlir.register_lowering(integer_pow_p, _integer_pow_lowering)
 
@@ -3574,11 +3618,16 @@ def _select_transpose_rule(t, which, *cases):
                      for c in cases]
   else:
     zeros = full_like(t, 0)
-    return [None] + [
-        select(eq(which, _const(which, i)), t, zeros)
-        if ad.is_undefined_primal(case) else None
-        for i, case in enumerate(cases)
-    ]
+    if (dtypes.dtype(which) == np.dtype(np.bool_) and
+        config.new_select_transpose.value):
+      ct0 = select(which, zeros, t) if ad.is_undefined_primal(cases[0]) else None
+      ct1 = select(which, t, zeros) if ad.is_undefined_primal(cases[1]) else None
+      return (None, ct0, ct1)
+    else:
+      return [None] + [
+          select(eq(which, _const(which, i)), t, zeros)
+          if ad.is_undefined_primal(case) else None for i, case in enumerate(cases)
+      ]
 
 def _select_batch_rule(batched_args, batch_dims, **unused_kwargs):
   which, *cases = batched_args
@@ -3813,11 +3862,11 @@ def _reduce_lower(ctx, *values, computation, jaxpr, dimensions):
   ir_types = [mlir.aval_to_ir_type(aval) for aval in init_value_avals]
   reducer = op.regions[0].blocks.append(*(ir_types + ir_types))
   with ir.InsertionPoint(reducer):
-    reducer_ctx = ctx.module_context.replace(
-        name_stack=source_info_util.new_name_stack())
+    name_stack = source_info_util.new_name_stack()
     if jaxpr.effects:
       raise NotImplementedError('Cannot lower effectful `reduce`.')
-    out_nodes, _ = mlir.jaxpr_subcomp(reducer_ctx, jaxpr.jaxpr, mlir.TokenSet(),
+    out_nodes, _ = mlir.jaxpr_subcomp(ctx.module_context, jaxpr.jaxpr,
+                                      name_stack, mlir.TokenSet(),
                                       jaxpr.consts,
                                       *([a] for a in reducer.arguments),
                                       dim_var_values=ctx.dim_var_values)
@@ -5038,8 +5087,7 @@ class BIntRules:
     return handler
 
   @staticmethod
-  def global_sharded_result_handler(aval, out_sharding, committed,
-                                    is_out_sharding_from_xla):
+  def global_sharded_result_handler(aval, out_sharding, committed):
     phys_aval = core.physical_aval(aval)
     phys_handler_maker = pxla.global_result_handlers[core.ShapedArray]
 
@@ -5047,8 +5095,7 @@ class BIntRules:
       raise NotImplementedError  # TODO(mattjj)
     else:
       phys_sharding = out_sharding
-    phys_handler = phys_handler_maker(phys_aval, phys_sharding, committed,
-                                      is_out_sharding_from_xla)
+    phys_handler = phys_handler_maker(phys_aval, phys_sharding, committed)
 
     def handler(bufs):
       return core.DArray(aval, phys_handler(bufs))
@@ -5059,11 +5106,23 @@ class BIntRules:
     return hlo_sharding
 
   @staticmethod
+  def logical_op_sharding(aval, phys_sharding):
+    return phys_sharding
+
+  @staticmethod
   def convert_from(bint_dtype, other_dtype) -> bool:
     return other_dtype in (np.dtype('int32'), np.dtype('int64'))
 
   @staticmethod
   def convert_to(other_dtype, bint_dtype) -> bool:
     return other_dtype in (np.dtype('int32'), np.dtype('int64'))
+
+  @staticmethod
+  def replicate_trailing_dims(ctx, val: ir.Value, aval) -> ir.Value:
+    return val
+
+  @staticmethod
+  def check_replicated_trailing_dims(sharding: jax.sharding.GSPMDSharding, aval):
+    pass
 
 core.bint._rules = BIntRules

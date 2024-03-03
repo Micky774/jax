@@ -388,7 +388,7 @@ def _conv(x: Array, y: Array, mode: str, op: str, precision: PrecisionLike,
 @partial(jit, static_argnames=('mode', 'precision', 'preferred_element_type'))
 def convolve(a: ArrayLike, v: ArrayLike, mode: str = 'full', *,
              precision: PrecisionLike = None,
-             preferred_element_type: dtype | None = None) -> Array:
+             preferred_element_type: DTypeLike | None = None) -> Array:
   util.check_arraylike("convolve", a, v)
   return _conv(asarray(a), asarray(v), mode=mode, op='convolve',
                precision=precision, preferred_element_type=preferred_element_type)
@@ -399,7 +399,7 @@ def convolve(a: ArrayLike, v: ArrayLike, mode: str = 'full', *,
 @partial(jit, static_argnames=('mode', 'precision', 'preferred_element_type'))
 def correlate(a: ArrayLike, v: ArrayLike, mode: str = 'valid', *,
               precision: PrecisionLike = None,
-              preferred_element_type: dtype | None = None) -> Array:
+              preferred_element_type: DTypeLike | None = None) -> Array:
   util.check_arraylike("correlate", a, v)
   return _conv(asarray(a), asarray(v), mode=mode, op='correlate',
                precision=precision, preferred_element_type=preferred_element_type)
@@ -888,7 +888,7 @@ def squeeze(a: ArrayLike, axis: int | Sequence[int] | None = None) -> Array:
   return _squeeze(asarray(a), _ensure_index_tuple(axis) if axis is not None else None)
 
 @partial(jit, static_argnames=('axis',), inline=True)
-def _squeeze(a: Array, axis: tuple[int]) -> Array:
+def _squeeze(a: Array, axis: tuple[int, ...]) -> Array:
   if axis is None:
     a_shape = shape(a)
     if not core.is_constant_shape(a_shape):
@@ -940,38 +940,40 @@ def isclose(a: ArrayLike, b: ArrayLike, rtol: ArrayLike = 1e-05, atol: ArrayLike
             equal_nan: bool = False) -> Array:
   a, b = util.promote_args("isclose", a, b)
   dtype = _dtype(a)
-  if issubdtype(dtype, inexact):
-    if issubdtype(dtype, complexfloating):
-      dtype = util._complex_elem_type(dtype)
-    rtol = lax.convert_element_type(rtol, dtype)
-    atol = lax.convert_element_type(atol, dtype)
-    out = lax.le(
-      lax.abs(lax.sub(a, b)),
-      lax.add(atol, lax.mul(rtol, lax.abs(b))))
-    # This corrects the comparisons for infinite and nan values
-    a_inf = ufuncs.isinf(a)
-    b_inf = ufuncs.isinf(b)
-    any_inf = ufuncs.logical_or(a_inf, b_inf)
-    both_inf = ufuncs.logical_and(a_inf, b_inf)
-    # Make all elements where either a or b are infinite to False
-    out = ufuncs.logical_and(out, ufuncs.logical_not(any_inf))
-    # Make all elements where both a or b are the same inf to True
-    same_value = lax.eq(a, b)
-    same_inf = ufuncs.logical_and(both_inf, same_value)
-    out = ufuncs.logical_or(out, same_inf)
-
-    # Make all elements where either a or b is NaN to False
-    a_nan = ufuncs.isnan(a)
-    b_nan = ufuncs.isnan(b)
-    any_nan = ufuncs.logical_or(a_nan, b_nan)
-    out = ufuncs.logical_and(out, ufuncs.logical_not(any_nan))
-    if equal_nan:
-      # Make all elements where both a and b is NaN to True
-      both_nan = ufuncs.logical_and(a_nan, b_nan)
-      out = ufuncs.logical_or(out, both_nan)
-    return out
-  else:
+  if dtypes.issubdtype(dtype, dtypes.extended):
     return lax.eq(a, b)
+
+  a, b = util.promote_args_inexact("isclose", a, b)
+  dtype = _dtype(a)
+  if issubdtype(dtype, complexfloating):
+    dtype = util._complex_elem_type(dtype)
+  rtol = lax.convert_element_type(rtol, dtype)
+  atol = lax.convert_element_type(atol, dtype)
+  out = lax.le(
+    lax.abs(lax.sub(a, b)),
+    lax.add(atol, lax.mul(rtol, lax.abs(b))))
+  # This corrects the comparisons for infinite and nan values
+  a_inf = ufuncs.isinf(a)
+  b_inf = ufuncs.isinf(b)
+  any_inf = ufuncs.logical_or(a_inf, b_inf)
+  both_inf = ufuncs.logical_and(a_inf, b_inf)
+  # Make all elements where either a or b are infinite to False
+  out = ufuncs.logical_and(out, ufuncs.logical_not(any_inf))
+  # Make all elements where both a or b are the same inf to True
+  same_value = lax.eq(a, b)
+  same_inf = ufuncs.logical_and(both_inf, same_value)
+  out = ufuncs.logical_or(out, same_inf)
+
+  # Make all elements where either a or b is NaN to False
+  a_nan = ufuncs.isnan(a)
+  b_nan = ufuncs.isnan(b)
+  any_nan = ufuncs.logical_or(a_nan, b_nan)
+  out = ufuncs.logical_and(out, ufuncs.logical_not(any_nan))
+  if equal_nan:
+    # Make all elements where both a and b is NaN to True
+    both_nan = ufuncs.logical_and(a_nan, b_nan)
+    out = ufuncs.logical_or(out, both_nan)
+  return out
 
 
 def _interp(x: ArrayLike, xp: ArrayLike, fp: ArrayLike,
@@ -1425,7 +1427,7 @@ def nonzero(a: ArrayLike, *, size: int | None = None,
 
 @util.implements(np.flatnonzero, lax_description=_NONZERO_DOC, extra_params=_NONZERO_EXTRA_PARAMS)
 def flatnonzero(a: ArrayLike, *, size: int | None = None,
-                fill_value: None | ArrayLike | tuple[ArrayLike] = None) -> Array:
+                fill_value: None | ArrayLike | tuple[ArrayLike, ...] = None) -> Array:
   return nonzero(ravel(a), size=size, fill_value=fill_value)[0]
 
 
@@ -2360,15 +2362,7 @@ def _check_forgot_shape_tuple(name, shape, dtype) -> str | None:  # type: ignore
 
 @util.implements(np.array_equal)
 def array_equal(a1: ArrayLike, a2: ArrayLike, equal_nan: bool = False) -> Array:
-  try:
-    a1, a2 = asarray(a1), asarray(a2)
-  except Exception as err:
-    # TODO(jakevdp): Deprecated 2023-11-23; change to error.
-    warnings.warn("Inputs to array_equal() cannot be coerced to array. "
-                  "Returning False; in the future this will raise an exception.\n"
-                  f"{err!r}",
-                  DeprecationWarning, stacklevel=2)
-    return bool_(False)
+  a1, a2 = asarray(a1), asarray(a2)
   if shape(a1) != shape(a2):
     return bool_(False)
   eq = asarray(a1 == a2)
@@ -2379,15 +2373,7 @@ def array_equal(a1: ArrayLike, a2: ArrayLike, equal_nan: bool = False) -> Array:
 
 @util.implements(np.array_equiv)
 def array_equiv(a1: ArrayLike, a2: ArrayLike) -> Array:
-  try:
-    a1, a2 = asarray(a1), asarray(a2)
-  except Exception as err:
-    # TODO(jakevdp): Deprecated 2023-11-23; change to error.
-    warnings.warn("Inputs to array_equiv() cannot be coerced to array. "
-                  "Returning False; in the future this will raise an exception.\n"
-                  f"{err!r}",
-                  DeprecationWarning, stacklevel=2)
-    return bool_(False)
+  a1, a2 = asarray(a1), asarray(a2)
   try:
     eq = ufuncs.equal(a1, a2)
   except ValueError:

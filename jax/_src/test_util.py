@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Generator, Iterable, Sequence
 from contextlib import contextmanager, ExitStack
+import datetime
 import inspect
 import io
 import functools
@@ -49,6 +50,7 @@ from jax._src import linear_util as lu
 from jax._src import dtypes as _dtypes
 from jax._src import monitoring
 from jax._src import stages
+from jax._src.lib import xla_client as xc
 from jax._src.cloud_tpu_init import running_in_cloud_tpu_vm
 from jax._src.interpreters import pxla
 from jax._src.numpy.util import promote_dtypes, promote_dtypes_inexact
@@ -225,6 +227,22 @@ def count_primitive_compiles():
 
 
 @contextmanager
+def count_device_put_fast_path_hit():
+  original_fn = xc.copy_array_to_devices_with_sharding
+  count = [0]
+
+  def copy_array_to_devices_with_sharding_and_count(*args, **kwargs):
+    count[0] += 1
+    return original_fn(*args, **kwargs)
+
+  xc.copy_array_to_devices_with_sharding = copy_array_to_devices_with_sharding_and_count
+  try:
+    yield count
+  finally:
+    xc.copy_array_to_devices_with_sharding = original_fn
+
+
+@contextmanager
 def count_pjit_cpp_cache_miss():
   original_pjit_lower = pjit_lib._pjit_lower
   count = [0]
@@ -348,6 +366,24 @@ def is_device_cuda():
 
 def is_cloud_tpu():
   return running_in_cloud_tpu_vm
+
+# Returns True if it is not cloud TPU. If it is cloud TPU, returns True if it is
+# built at least `date``.
+# TODO(b/327203806): after libtpu adds a XLA version and the oldest support
+# libtpu contains the XLA version, remove using built time to skip tests.
+def if_cloud_tpu_at_least(date: datetime.date):
+  if not is_cloud_tpu():
+    return True
+  # The format of Cloud TPU platform_version is like:
+  # PJRT C API
+  # TFRT TPU v2
+  # Built on Oct 30 2023 03:04:42 (1698660263) cl/577737722
+  platform_version = xla_bridge.get_backend().platform_version.split('\n')[-1]
+  results = re.findall(r'\(.*?\)', platform_version)
+  if len(results) != 1:
+    return True
+  build_date = date.fromtimestamp(int(results[0][1:-1]))
+  return build_date >= date
 
 def pjrt_c_api_version_at_least(major_version: int, minor_version: int):
   pjrt_c_api_versions = xla_bridge.backend_pjrt_c_api_version()
@@ -1413,3 +1449,63 @@ def numpy_vecdot(x, y, axis):
   y = np.moveaxis(y, axis, -1)
   x, y = np.broadcast_arrays(x, y)
   return np.matmul(np.conj(x[..., None, :]), y[..., None])[..., 0, 0]
+
+
+def complex_plane_sample(dtype, size_re=10, size_im=None):
+  """Return a 2-D array of complex numbers that covers the complex plane
+     with a grid of samples.
+
+     The size of the grid is (3 + 2 * size_im) x (3 + 2 * size_re)
+     that includes infinity points, extreme finite points, and the
+     specified number of points from real and imaginary axis.
+
+     For example:
+
+     >>> print(complex_plane_sample(np.complex64, 0, 3))
+     [[-inf          -infj   0.          -infj  inf          -infj]
+      [-inf-3.4028235e+38j   0.-3.4028235e+38j  inf-3.4028235e+38j]
+      [-inf-2.0000052e+00j   0.-2.0000052e+00j  inf-2.0000052e+00j]
+      [-inf-1.1754944e-38j   0.-1.1754944e-38j  inf-1.1754944e-38j]
+      [-inf+0.0000000e+00j   0.+0.0000000e+00j  inf+0.0000000e+00j]
+      [-inf+1.1754944e-38j   0.+1.1754944e-38j  inf+1.1754944e-38j]
+      [-inf+2.0000052e+00j   0.+2.0000052e+00j  inf+2.0000052e+00j]
+      [-inf+3.4028235e+38j   0.+3.4028235e+38j  inf+3.4028235e+38j]
+      [-inf          +infj   0.          +infj  inf          +infj]]
+
+  """
+  if size_im is None:
+    size_im = size_re
+  finfo = np.finfo(dtype)
+
+  def make_axis_points(size):
+    logmin = np.log10(abs(finfo.min))
+    logtiny = np.log10(finfo.tiny)
+    logmax = np.log10(finfo.max)
+    axis_points = np.zeros(3 + 2 * size, dtype=finfo.dtype)
+
+    with warnings.catch_warnings():
+      # Silence RuntimeWarning: overflow encountered in cast
+      warnings.simplefilter("ignore")
+      axis_points[1:size + 1] = -np.logspace(logmin, logtiny, size, dtype=finfo.dtype)
+      axis_points[-size - 1:-1] = np.logspace(logtiny, logmax, size, dtype=finfo.dtype)
+
+    if size > 1:
+      axis_points[1] = finfo.min
+      axis_points[-2] = finfo.max
+    if size > 0:
+      axis_points[size] = -finfo.tiny
+      axis_points[-size - 1] = finfo.tiny
+    axis_points[0] = -np.inf
+    axis_points[-1] = np.inf
+    return axis_points
+
+  real_axis_points = make_axis_points(size_re)
+  imag_axis_points = make_axis_points(size_im)
+
+  real_part = real_axis_points.reshape((-1, 3 + 2 * size_re)).repeat(3 + 2 * size_im, 0).astype(dtype)
+
+  imag_part = imag_axis_points.repeat(2).view(dtype)
+  imag_part.real[:] = 0
+  imag_part = imag_part.reshape((3 + 2 * size_im, -1)).repeat(3 + 2 * size_re, 1)
+
+  return real_part + imag_part

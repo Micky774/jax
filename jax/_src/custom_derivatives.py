@@ -437,8 +437,8 @@ def _custom_jvp_call_mlir_translation(ctx, *args, call_jaxpr, jvp_jaxpr_thunk,
   args_ = map(mlir.wrap_singleton_ir_values, args)
   consts = mlir._ir_consts(call_jaxpr.consts)
   out, tokens = mlir.jaxpr_subcomp(ctx.module_context, call_jaxpr.jaxpr,
-                                   ctx.tokens_in, consts, *args_,
-                                   dim_var_values=ctx.dim_var_values)
+                                   ctx.name_stack, ctx.tokens_in, consts,
+                                   *args_, dim_var_values=ctx.dim_var_values)
   ctx.set_tokens_out(tokens)
   return out
 mlir.register_lowering(custom_jvp_call_p, _custom_jvp_call_mlir_translation)
@@ -446,9 +446,9 @@ mlir.register_lowering(custom_jvp_call_p, _custom_jvp_call_mlir_translation)
 # If a (multi)linear function is defined with a custom jvp, then
 # custom_jvp_call_ can appear in jaxprs to be transposed. Since it's already
 # been linearized, we can drop the jvp rule.
-def _custom_jvp_call_transpose(params, jaxpr, args, ct, _, reduce_axes):
+def _custom_jvp_call_transpose(params, jaxpr, args, ct, _):
   del params
-  return ad.backward_pass(jaxpr.jaxpr, reduce_axes, None, jaxpr.consts, args, ct)
+  return ad.backward_pass(jaxpr.jaxpr, None, jaxpr.consts, args, ct)
 ad.primitive_transposes[custom_jvp_call_p] = _custom_jvp_call_transpose
 
 
@@ -734,12 +734,17 @@ def _flatten_bwd(in_tree, in_avals, out_trees, *args):
   zero = object()  # non-pytree sentinel to replace Nones in py_cts_in
   dummy = tree_unflatten(in_tree, [object()] * in_tree.num_leaves)
   cts_in_flat = []
-  append = lambda x, d: cts_in_flat.extend([x] * len(tree_flatten(d)[0])) or x
+  def append(x, d):
+    num_leaves = len(tree_flatten(d)[0])
+    if x is None and d is not None:
+      cts_in_flat.extend([zero] * num_leaves)
+    elif x is not None:
+      cts_in_flat.extend([x] * num_leaves)
+    return x
   try:
     if not isinstance(py_cts_in, tuple):
       raise ValueError
-    tree_map(append,
-             tuple(zero if ct is None else ct for ct in py_cts_in), dummy)
+    tree_map(append, py_cts_in, dummy, is_leaf=lambda x: x is None)
   except ValueError:
     _, in_tree2 = tree_flatten(py_cts_in)
     msg = ("Custom VJP rule must produce an output with the same container "

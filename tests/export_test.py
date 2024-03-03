@@ -25,7 +25,6 @@ from absl.testing import absltest
 import jax
 from jax import lax
 from jax import numpy as jnp
-from jax import tree_util
 from jax.experimental import export
 from jax.experimental.export import _export
 from jax.experimental import pjit
@@ -185,7 +184,7 @@ class JaxExportTest(jtu.JaxTestCase):
     self.assertEqual("my_fun", exp.fun_name)
     self.assertEqual((export.default_lowering_platform(),),
                      exp.lowering_platforms)
-    self.assertEqual(tree_util.tree_flatten(((1,), {}))[1], exp.in_tree)
+    self.assertEqual(jax.tree.flatten(((1,), {}))[1], exp.in_tree)
     self.assertEqual((core.ShapedArray((4,), dtype=np.float32),), exp.in_avals)
     self.assertEqual((core.ShapedArray((4,), dtype=np.float32),), exp.out_avals)
 
@@ -201,9 +200,9 @@ class JaxExportTest(jtu.JaxTestCase):
     self.assertEqual(exp.lowering_platforms, ("cpu",))
     args = ((a, b),)
     kwargs = dict(a=a, b=b)
-    self.assertEqual(exp.in_tree, tree_util.tree_flatten((args, kwargs))[1])
+    self.assertEqual(exp.in_tree, jax.tree.flatten((args, kwargs))[1])
     self.assertEqual(exp.in_avals, (a_aval, b_aval, a_aval, b_aval))
-    self.assertEqual(exp.out_tree, tree_util.tree_flatten(f(*args, **kwargs))[1])
+    self.assertEqual(exp.out_tree, jax.tree.flatten(f(*args, **kwargs))[1])
     self.assertEqual(exp.out_avals, (a_aval, b_aval, a_aval, b_aval, a_aval, b_aval))
 
   def test_basic(self):
@@ -917,7 +916,6 @@ class JaxExportTest(jtu.JaxTestCase):
                           res_r.addressable_shards[i].data)
 
   @jtu.parameterized_filterable(
-    one_containing="in_shardings_None_out_shardings_P_with_mesh_False",
     kwargs=[
       dict(in_shardings=in_shardings, out_shardings=out_shardings,
            with_mesh=with_mesh)
@@ -972,15 +970,17 @@ class JaxExportTest(jtu.JaxTestCase):
     else:
       primal_out_sharding = "{replicated}"
 
-    main = re.compile(
-      r"func.func public @main\(%arg0: tensor<10x20xf32>.*"
-      "mhlo.sharding = \"" + re.escape(primal_in_sharding) + "\""
-      r".*%arg1: tensor<20x10xf32>.*"
-      "mhlo.sharding = \"" + re.escape(primal_out_sharding) + "\""
-      # result
-      r".*->.*\(tensor<10x20xf32>.*"
-      "mhlo.sharding = \"" + re.escape(primal_in_sharding) + "\"")
-    self.assertRegex(vjp_module_str, main)
+    # TODO(b/326476605): Change the condition below if required.
+    if in_shardings == "P":
+      main = re.compile(
+        r"func.func public @main\(%arg0: tensor<10x20xf32>.*"
+        "mhlo.sharding = \"" + re.escape(primal_in_sharding) + "\""
+        r".*%arg1: tensor<20x10xf32>.*"
+        "mhlo.sharding = \"" + re.escape(primal_out_sharding) + "\""
+        # result
+        r".*->.*\(tensor<10x20xf32>.*"
+        "mhlo.sharding = \"" + re.escape(primal_in_sharding) + "\"")
+      self.assertRegex(vjp_module_str, main)
 
     # Custom calls for the primal input shape all match primal_in_sharding
     primal_in_calls = re.findall(

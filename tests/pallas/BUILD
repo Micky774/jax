@@ -48,15 +48,17 @@ jax_test(
     disable_configs = [
         "gpu",
         "gpu_a100",
-        "gpu_p100",
     ],
     enable_configs = [
         "gpu_x32",
         "gpu_a100_x32",
     ],
+    env = {
+        "JAX_TRITON_COMPILE_VIA_XLA": "0",
+    },
     shard_count = 4,
     deps = [
-        "//third_party/py/jax:pallas_gpu",
+        "//jax:pallas_gpu",
     ] + py_deps("absl/testing") + py_deps("numpy"),
 )
 
@@ -88,8 +90,8 @@ jax_test(
     ],
     shard_count = 1,
     deps = [
-        "//third_party/py/jax:pallas_gpu",
-        "//third_party/py/jax:pallas_gpu_ops",
+        "//jax:pallas_gpu",
+        "//jax:pallas_gpu_ops",
     ] + py_deps("absl/testing") + py_deps("numpy"),
 )
 
@@ -119,12 +121,9 @@ jax_test(
         "gpu_x32",
         "gpu_a100_x32",
     ],
-    env = {
-        "JAX_TRITON_COMPILE_VIA_XLA": "1",
-    },
     shard_count = 4,
     deps = [
-        "//third_party/py/jax:pallas_gpu",
+        "//jax:pallas_gpu",
     ] + py_deps("absl/testing") + py_deps("numpy"),
 )
 
@@ -138,7 +137,7 @@ jax_test(
         "tpu",
     ],
     deps = [
-        "//third_party/py/jax:pallas",
+        "//jax:pallas",
     ] + py_deps("absl/testing") + py_deps("hypothesis") + py_deps("numpy"),
 )
 
@@ -152,7 +151,7 @@ jax_test(
         "gpu",
     ],
     deps = [
-        "//third_party/py/jax:pallas_tpu_ops",
+        "//jax:pallas_tpu_ops",
     ] + py_deps("absl/testing") + py_deps("numpy") + py_deps("hypothesis"),
 )
 
@@ -172,7 +171,7 @@ jax_test(
         "notsan",  # Times out.
     ],
     deps = [
-        "//third_party/py/jax:pallas_tpu_ops",
+        "//jax:pallas_tpu_ops",
     ] + py_deps("absl/testing") + py_deps("numpy") + py_deps("hypothesis"),
 )
 
@@ -186,7 +185,7 @@ jax_test(
         "gpu",
     ],
     deps = [
-        "//third_party/py/jax:pallas_tpu_ops",
+        "//jax:pallas_tpu_ops",
     ] + py_deps("absl/testing") + py_deps("numpy") + py_deps("hypothesis"),
 )
 
@@ -198,8 +197,8 @@ jax_test(
     ],
     main = "pallas_call_tpu_test.py",
     deps = [
-        "//third_party/py/jax:extend",
-        "//third_party/py/jax:pallas_tpu",
-        "//third_party/py/jax:pallas_tpu_ops",
+        "//jax:extend",
+        "//jax:pallas_tpu",
+        "//jax:pallas_tpu_ops",
     ],
 )

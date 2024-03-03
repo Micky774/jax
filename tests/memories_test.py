@@ -23,6 +23,7 @@ import jax
 from jax import lax
 from jax._src import test_util as jtu
 from jax._src import xla_bridge as xb
+from jax._src.lib import xla_extension_version
 from jax._src import config
 from jax.ad_checkpoint import checkpoint_name, checkpoint as new_checkpoint
 import jax.numpy as jnp
@@ -677,10 +678,6 @@ class MemoriesComputationTest(jtu.BufferDonationTestCase):
     self.assertEqual(cache_info2.misses, cache_info1.misses)
 
   def test_device_put_host_to_hbm(self):
-    # TODO(jieying): remove after 12/26/2023.
-    if not jtu.pjrt_c_api_version_at_least(0, 32):
-      raise unittest.SkipTest("CopyToMemorySpace is not supported on PJRT C API version < 0.32.")
-
     mesh = jtu.create_global_mesh((4, 2), ("x", "y"))
     s_host = NamedSharding(mesh, P("y"), memory_kind="unpinned_host")
     np_inp = jnp.arange(16).reshape(8, 2)
@@ -698,10 +695,6 @@ class MemoriesComputationTest(jtu.BufferDonationTestCase):
         out_on_hbm, np_inp, s_hbm, "device")
 
   def test_device_put_hbm_to_host(self):
-    # TODO(jieying): remove after 12/26/2023.
-    if not jtu.pjrt_c_api_version_at_least(0, 32):
-      raise unittest.SkipTest("CopyToMemorySpace is not supported on PJRT C API version < 0.32.")
-
     mesh = jtu.create_global_mesh((4, 2), ("x", "y"))
     s_host = NamedSharding(mesh, P("y"), memory_kind="unpinned_host")
     inp = jnp.arange(16).reshape(8, 2)
@@ -718,9 +711,6 @@ class MemoriesComputationTest(jtu.BufferDonationTestCase):
   def test_device_put_different_device_and_memory_host_to_hbm(self):
     if jax.device_count() < 3:
       raise unittest.SkipTest("Test requires >=3 devices")
-    # TODO(jieying): remove after 12/26/2023.
-    if not jtu.pjrt_c_api_version_at_least(0, 32):
-      raise unittest.SkipTest("CopyToMemorySpace is not supported on PJRT C API version < 0.32.")
 
     out_host0 = jax.device_put(
         jnp.arange(8),
@@ -738,9 +728,6 @@ class MemoriesComputationTest(jtu.BufferDonationTestCase):
   def test_device_put_different_device_and_memory_hbm_to_host(self):
     if jax.device_count() < 3:
       raise unittest.SkipTest("Test requires >=3 devices")
-    # TODO(jieying): remove after 12/26/2023.
-    if not jtu.pjrt_c_api_version_at_least(0, 32):
-      raise unittest.SkipTest("CopyToMemorySpace is not supported on PJRT C API version < 0.32.")
 
     out_hbm0 = jnp.arange(8)
 
@@ -758,9 +745,6 @@ class MemoriesComputationTest(jtu.BufferDonationTestCase):
   def test_device_put_on_different_device_with_the_same_memory_kind(self):
     if len(jax.devices()) < 2:
       raise unittest.SkipTest("Test requires >=2 devices.")
-    # TODO(jieying): remove after 12/26/2023.
-    if not jtu.pjrt_c_api_version_at_least(0, 32):
-      raise unittest.SkipTest("CopyToMemorySpace is not supported on PJRT C API version < 0.32.")
 
     np_inp = np.arange(16).reshape(8, 2)
 
@@ -779,10 +763,6 @@ class MemoriesComputationTest(jtu.BufferDonationTestCase):
         out_host_dev_1, np_inp, s_host_dev_1, "unpinned_host")
 
   def test_device_put_resharding(self):
-    # TODO(jieying): remove after 12/26/2023.
-    if not jtu.pjrt_c_api_version_at_least(0, 32):
-      raise unittest.SkipTest("CopyToMemorySpace is not supported on PJRT C API version < 0.32.")
-
     mesh = jtu.create_global_mesh((2, 2), ("x", "y"))
     s_host = NamedSharding(mesh, P("x", "y"), memory_kind="unpinned_host")
     s_hbm = s_host.with_memory_kind("device")
@@ -807,10 +787,6 @@ class MemoriesComputationTest(jtu.BufferDonationTestCase):
         out_sharded_hbm, np_inp, s_hbm, "device")
 
   def test_jit_host_inputs_via_device_put_outside(self):
-    # TODO(jieying): remove after 12/26/2023.
-    if not jtu.pjrt_c_api_version_at_least(0, 32):
-      raise unittest.SkipTest("CopyToMemorySpace is not supported on PJRT C API version < 0.32.")
-
     mesh = jtu.create_global_mesh((4, 2), ("x", "y"))
     s_host = NamedSharding(mesh, P("x", "y"), memory_kind="unpinned_host")
     s_hbm = s_host.with_memory_kind("device")
@@ -1136,17 +1112,31 @@ class ActivationOffloadingTest(jtu.JaxTestCase):
     f = jax.jit(jax.grad(f))
     f(inp)  # doesn't crash
 
-    compiled_text = f.lower(inp).compile().as_text()
+    compiled_f = f.lower(inp).compile()
+
+    compiled_text = compiled_f.as_text()
     if compiled_text is not None:
       self.assertIn('S(5)', compiled_text)
       self.assertRegex(compiled_text, r"copy-start.*S\(5\)")
       self.assertRegex(compiled_text, r"copy-done.*S\(5\)")
 
+    compiled_stats = compiled_f.memory_analysis()
+    if compiled_stats is not None:
+      if xla_extension_version >= 240 and jtu.pjrt_c_api_version_at_least(0, 43):
+        self.assertGreater(compiled_stats.host_temp_size_in_bytes, 0)
+
   def test_remat_scan_jaxpr_offloadable(self):
     mesh = jtu.create_global_mesh((2,), ("x",))
     shape = (256, 128)
     np_inp = np.arange(math.prod(shape), dtype=np.float32).reshape(shape)
-    inp = jax.device_put(np_inp, NamedSharding(mesh, P("x")))
+    s = NamedSharding(mesh, P("x"))
+    inp = jax.device_put(np_inp, s)
+
+    with self.assertRaisesRegex(
+        ValueError, "The names should be exclusive and should not intersect"):
+      jax.checkpoint_policies.save_and_offload_only_these_names(
+          names_which_can_be_saved=["y"], names_which_can_be_offloaded=["y", "w"],
+          offload_src="device", offload_dst="pinned_host")
 
     policy = jax.checkpoint_policies.save_and_offload_only_these_names(
         names_which_can_be_saved=["y"], names_which_can_be_offloaded=["z", "w"],
@@ -1158,6 +1148,7 @@ class ActivationOffloadingTest(jtu.JaxTestCase):
         y, _ = ys
         y = checkpoint_name(jnp.sin(y), "y")
         z = checkpoint_name(jnp.sin(y), "z")
+        z = jax.lax.with_sharding_constraint(z, s)
         w = checkpoint_name(jnp.sin(z), "w")
         return (w, jnp.sum(w)), None
       _, scan_out = jax.lax.scan(g, (x, np.array(1, dtype=np.float32)), [np_inp])[0]
@@ -1178,11 +1169,58 @@ class ActivationOffloadingTest(jtu.JaxTestCase):
     f = jax.jit(jax.grad(f))
     f(inp)  # doesn't crash
 
-    compiled_text = f.lower(inp).compile().as_text()
+    compiled_f = f.lower(inp).compile()
+
+    compiled_text = compiled_f.as_text()
     if compiled_text is not None:
       self.assertIn('S(5)', compiled_text)
       self.assertNotRegex(compiled_text, r"copy-start.*S\(5\)")
       self.assertNotRegex(compiled_text, r"copy-done.*S\(5\)")
+
+    compiled_stats = compiled_f.memory_analysis()
+    if compiled_stats is not None:
+      if xla_extension_version >= 240 and jtu.pjrt_c_api_version_at_least(0, 43):
+        self.assertGreater(compiled_stats.host_temp_size_in_bytes, 0)
+
+  def test_remat_scan_layout_change_offloadable(self):
+    mesh = jtu.create_global_mesh((2,), ("x",))
+    shape = (256, 128)
+    np_inp = np.arange(math.prod(shape), dtype=np.float32).reshape(shape)
+    s = NamedSharding(mesh, P("x"))
+    inp = jax.device_put(np_inp, s)
+
+    policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+        names_which_can_be_saved=["y"], names_which_can_be_offloaded=["z", "w"],
+        offload_src='device', offload_dst='pinned_host')
+
+    @functools.partial(remat, policy=policy)
+    def f(x):
+      def g(ys, _):
+        y, _ = ys
+        y = checkpoint_name(jnp.sin(y), "y")
+        z = checkpoint_name(jnp.sin(y), "z")
+        z = jax.lax.with_sharding_constraint(z, s)
+        z = z.T
+        w = checkpoint_name(jnp.sin(z), "w")
+        return (w.T, jnp.sum(w)), None
+      _, scan_out = jax.lax.scan(g, (x, np.array(1, dtype=np.float32)), [np_inp])[0]
+      return scan_out
+
+    f = jax.jit(jax.grad(f))
+    f(inp)  # doesn't crash
+
+    compiled_f = f.lower(inp).compile()
+
+    compiled_text = compiled_f.as_text()
+    if compiled_text is not None:
+      self.assertIn('S(5)', compiled_text)
+      self.assertNotRegex(compiled_text, r"copy-start.*S\(5\)")
+      self.assertNotRegex(compiled_text, r"copy-done.*S\(5\)")
+
+    compiled_stats = compiled_f.memory_analysis()
+    if compiled_stats is not None:
+      if xla_extension_version >= 240 and jtu.pjrt_c_api_version_at_least(0, 43):
+        self.assertGreater(compiled_stats.host_temp_size_in_bytes, 0)
 
   def test_remat_checkpoint_dots_with_no_batch_dims(self):
     policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(
@@ -1203,12 +1241,18 @@ class ActivationOffloadingTest(jtu.JaxTestCase):
     f = jax.jit(jax.grad(f))
     f(inp)  # doesn't crash
 
-    compiled_text = f.lower(inp).compile().as_text()
+    compiled_f = f.lower(inp).compile()
+
+    compiled_text = compiled_f.as_text()
     if compiled_text is not None:
       self.assertIn('S(5)', compiled_text)
       self.assertRegex(compiled_text, r"copy-start.*S\(5\)")
       self.assertRegex(compiled_text, r"copy-done.*S\(5\)")
 
+    compiled_stats = compiled_f.memory_analysis()
+    if compiled_stats is not None:
+      if xla_extension_version >= 240 and jtu.pjrt_c_api_version_at_least(0, 43):
+        self.assertGreater(compiled_stats.host_temp_size_in_bytes, 0)
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())

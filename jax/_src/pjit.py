@@ -33,6 +33,7 @@ from jax._src import api_util
 from jax._src import config
 from jax._src import core
 from jax._src import dispatch
+from jax._src import dtypes
 from jax._src import linear_util as lu
 from jax._src import mesh as mesh_lib
 from jax._src import op_shardings
@@ -67,7 +68,7 @@ from jax._src.sharding_impls import (
     AUTO, UNSPECIFIED, UnspecifiedValue,
     ParsedPartitionSpec, SpecSync, get_single_pspec, is_auto, is_unspecified,
     is_unspecified_or_auto, prepare_axis_resources, parse_flatten_op_sharding)
-from jax._src.state import discharge as state_discharge
+from jax._src.state import discharge as state_discharge, RefEffect
 from jax._src.traceback_util import api_boundary
 from jax._src.tree_util import (
     tree_map, tree_flatten, tree_unflatten, treedef_is_leaf, tree_structure,
@@ -179,9 +180,10 @@ def _python_pjit(fun: Callable, infer_params_fn):
   return wrapped
 
 
-def _get_fastpath_data(executable, out_tree, args_flat, out_flat, attrs_tracked,
-                       ) -> Optional[pxla.MeshExecutableFastpathData]:
-  out_flat, out_tree = pxla.reflatten_outputs_for_dispatch(out_tree, out_flat)
+def _get_fastpath_data(
+    executable, out_tree, args_flat, out_flat, attrs_tracked, effects
+) -> Optional[pxla.MeshExecutableFastpathData]:
+  out_reflattened, out_tree = pxla.reflatten_outputs_for_dispatch(out_tree, out_flat)
 
   use_fastpath = (
       executable is not None and
@@ -191,14 +193,20 @@ def _get_fastpath_data(executable, out_tree, args_flat, out_flat, attrs_tracked,
       not executable.unsafe_call.ordered_effects and
       not executable.unsafe_call.has_unordered_effects and
       not executable.unsafe_call.has_host_callbacks and
-      all(isinstance(x, xc.ArrayImpl) for x in out_flat) and
+      all(isinstance(x, xc.ArrayImpl) for x in out_reflattened) and
       # no attr state effects
-      not attrs_tracked
-  )
+      not attrs_tracked and
+      # no ref state effects
+      not any(isinstance(e, RefEffect) for e in effects) and
+      # no prng reuse checking
+      not (config.enable_key_reuse_checks.value and any(
+        hasattr(arg, 'dtype') and dtypes.issubdtype(arg.dtype, dtypes.prng_key)
+        for arg in (*args_flat, *out_flat)))
+      )
 
   if use_fastpath:
-    out_avals = [o.aval for o in out_flat]
-    out_committed = [o._committed for o in out_flat]
+    out_avals = [o.aval for o in out_reflattened]
+    out_committed = [o._committed for o in out_reflattened]
     kept_var_bitvec = [i in executable._kept_var_idx
                        for i in range(len(args_flat))]
     fastpath_data = pxla.MeshExecutableFastpathData(
@@ -249,7 +257,7 @@ def _cpp_pjit(fun: Callable, infer_params_fn, static_argnums, static_argnames,
         fun, infer_params_fn, *args, **kwargs)
     executable = _read_most_recent_pjit_call_executable(jaxpr)
     maybe_fastpath_data = _get_fastpath_data(
-        executable, out_tree, args_flat, out_flat, attrs_tracked)
+        executable, out_tree, args_flat, out_flat, attrs_tracked, jaxpr.effects)
     return outs, maybe_fastpath_data
 
   if xla_extension_version >= 226:
@@ -1395,7 +1403,7 @@ def _pjit_call_impl(*args, jaxpr,
         donated_invars=donated_invars, name=name, keep_unused=keep_unused,
         inline=inline)
     fastpath_data = _get_fastpath_data(
-        compiled, tree_structure(out_flat), args, out_flat, [])
+        compiled, tree_structure(out_flat), args, out_flat, [], set())
     return out_flat, fastpath_data
 
   f = _get_jaxpr_as_fun(
@@ -1602,9 +1610,9 @@ def _pjit_cached_lower_jaxpr_to_fun(ctx, name, jaxpr, effects, in_shardings,
     # inputs or outputs because they are lost during MLIR->HLO conversion.
     # using_sharding_annotation=False means we add an identity operation instead.
     func = mlir.lower_jaxpr_to_fun(
-        mod_ctx, name, jaxpr, effects, arg_shardings=arg_shardings,
-        result_shardings=result_shardings, use_sharding_annotations=False,
-        api_name=api_name)
+        mod_ctx, name, jaxpr, effects, ctx.name_stack,
+        arg_shardings=arg_shardings, result_shardings=result_shardings,
+        use_sharding_annotations=False, api_name=api_name)
     mod_ctx.cached_primitive_lowerings[key] = func
   return func
 
@@ -1701,8 +1709,8 @@ def _pjit_batcher_for_sharding(
     else:
       new_gs = GSPMDSharding(s._device_assignment, new_op)  # type: ignore
     if hasattr(s, '_original_sharding'):
-      vmapped_s, _ = pxla._get_out_sharding_from_orig_sharding(
-          [new_gs], [None], s._original_sharding, None, [False])[0]  # type: ignore
+      vmapped_s = pxla._get_out_sharding_from_orig_sharding(
+          [new_gs], [None], s._original_sharding, None)[0]  # type: ignore
       new_gs = to_gspmd_sharding(vmapped_s, ndim)
     return new_gs
   else:
@@ -1761,7 +1769,7 @@ ad.primitive_jvps[pjit_p] = _pjit_jvp
 
 @weakref_lru_cache
 def _known_jaxpr_fwd(known_jaxpr: core.ClosedJaxpr,
-                     in_fwd: tuple[int | None]) -> core.ClosedJaxpr:
+                     in_fwd: tuple[int | None, ...]) -> core.ClosedJaxpr:
   updated_jaxpr = known_jaxpr.jaxpr.replace(
       outvars=[x for x, i in zip(known_jaxpr.jaxpr.outvars, in_fwd)
                if i is None])
@@ -1906,14 +1914,14 @@ def _pjit_transpose_trace(fun, in_avals):
   return transpose_jaxpr, attrs_tracked
 
 
-def _pjit_transpose(reduce_axes, cts_in, *primals_in,
+def _pjit_transpose(cts_in, *primals_in,
                     jaxpr, in_shardings, out_shardings,
                     resource_env, donated_invars, name, keep_unused, inline):
   def prune_type(ty, xs, maybe_zeros):
     return tuple(x for x, mz in zip(xs, maybe_zeros) if type(mz) is not ty)
 
   body = lu.wrap_init(ad.closed_backward_pass)
-  body = lu.hashable_partial(body, jaxpr, reduce_axes, False)
+  body = lu.hashable_partial(body, jaxpr, False)
   primals_and_nz_cts_in, in_treedef = tree_flatten((primals_in, cts_in))
   body, cts_out_treedef_thunk = flatten_fun_nokwargs(body, in_treedef)
 
@@ -1957,7 +1965,7 @@ ad.reducing_transposes[pjit_p] = _pjit_transpose
 
 @weakref_lru_cache
 def _dce_jaxpr_pjit(
-    jaxpr: core.ClosedJaxpr, used_outputs: tuple[bool]
+    jaxpr: core.ClosedJaxpr, used_outputs: tuple[bool, ...]
 ) -> tuple[core.ClosedJaxpr, list[bool]]:
   new_jaxpr, used_inputs = pe.dce_jaxpr(jaxpr.jaxpr, used_outputs)
   return core.ClosedJaxpr(new_jaxpr, jaxpr.consts), used_inputs

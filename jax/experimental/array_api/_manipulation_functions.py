@@ -24,7 +24,7 @@ def broadcast_arrays(*arrays: Array) -> list[Array]:
   return jax.numpy.broadcast_arrays(*arrays)
 
 
-def broadcast_to(x: Array, /, shape: tuple[int]) -> Array:
+def broadcast_to(x: Array, /, shape: tuple[int, ...]) -> Array:
   """Broadcasts an array to a specified shape."""
   return jax.numpy.broadcast_to(x, shape=shape)
 
@@ -58,7 +58,7 @@ def reshape(x: Array, /, shape: tuple[int, ...], *, copy: bool | None = None) ->
   return jax.numpy.reshape(x, shape)
 
 
-def roll(x: Array, /, shift: int | tuple[int], *, axis: int | tuple[int, ...] | None = None) -> Array:
+def roll(x: Array, /, shift: int | tuple[int, ...], *, axis: int | tuple[int, ...] | None = None) -> Array:
   """Rolls array elements along a specified axis."""
   return jax.numpy.roll(x, shift=shift, axis=axis)
 

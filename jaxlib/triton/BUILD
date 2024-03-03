@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("//jaxlib:jax.bzl", "pytype_strict_library")
+load("//jaxlib:jax.bzl", "if_windows", "pytype_strict_library")
 load("@llvm-project//mlir:tblgen.bzl", "gentbl_filegroup")
 
 licenses(["notice"])
@@ -33,8 +33,10 @@ pytype_strict_library(
     deps = [
         "//jaxlib/mlir:core",
         "//jaxlib/mlir:ir",
-        "//jaxlib/mlir/_mlir_libs:_triton_ext",
-    ],
+    ] + if_windows(
+        [],
+        ["//jaxlib/mlir/_mlir_libs:_triton_ext"],
+    ),
 )
 
 genrule(
@@ -47,13 +49,15 @@ genrule(
         "_triton_ops_gen.py",
         "_triton_enum_gen.py",
     ],
+    # Use $(RULEDIR) to avoid an implicit dependency on whether inputs are in bin or genfiles.
     cmd = """
     for src in $(SRCS); do
-      out=$${src//_raw/}
+      base=$$(basename $$src)
+      out=$(RULEDIR)/$${base//_raw/}
       echo '# pytype: skip-file' > $${out} && \
           cat $${src} |
-          sed -e 's/^from \\.\\./from mlir\\./g' |
-          sed -e 's/^from \\./from mlir\\.dialects\\./g' >> $${out}
+          sed -e 's/^from \\.\\./from jaxlib.mlir\\./g' |
+          sed -e 's/^from \\./from jaxlib.mlir\\.dialects\\./g' >> $${out}
     done
     """,
 )

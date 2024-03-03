@@ -51,6 +51,15 @@ def get_flag_prefixes() -> list[str]:
   return _extra_flag_prefixes
 
 
+def custom_hook() -> str:
+  """Custom hook for any addition to the cache key.
+
+  The custom hook will be called everytime get() is called and can be
+  defined to return a string that will be hashed into the cache key.
+  """
+  return ""
+
+
 def get(module: ir.Module,
         devices: np.ndarray,
         compile_options: xla_client.CompileOptions,
@@ -86,6 +95,7 @@ def get(module: ir.Module,
          lambda hash_obj: _hash_accelerator_config(hash_obj, devices, backend)),
       ("compression",
        lambda hash_obj: _hash_string(hash_obj, compression_algorithm)),
+      ("custom_hook", lambda hash_obj: _hash_string(hash_obj, custom_hook())),
   ]
 
   hash_obj = hashlib.sha256()
@@ -254,7 +264,7 @@ def _hash_xla_flags(hash_obj, extra_flag_prefixes: list[str]):
 
   # N.B. all XLA flags that take an argument must use '=' and not a space
   # (e.g. --xla_force_host_platform_device_count=8) (I think).
-  for flag in xla_flags:
+  for flag in sorted(xla_flags):
     if flag.split("=")[0] in xla_flags_to_exclude_from_cache_key:
       logger.debug("Not including XLA flag in cache key: %s", flag)
       continue

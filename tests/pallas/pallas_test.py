@@ -39,10 +39,14 @@ from jax.experimental.pallas.ops import layer_norm
 from jax.experimental.pallas.ops import rms_norm
 from jax.experimental.pallas.ops import softmax
 try:
-  from jax._src.pallas.triton.lowering import compile_jaxpr, _TRITON_COMPILE_VIA_XLA
+  from jax._src.pallas.triton.pallas_call_registration import (
+      compile_jaxpr,
+      _TRITON_COMPILE_VIA_XLA,
+  )
   from jax.experimental.pallas import gpu as plgpu
 except ModuleNotFoundError:
   compile_jaxpr = None
+  _TRITON_COMPILE_VIA_XLA = None
 import numpy as np
 
 
@@ -133,8 +137,11 @@ class PallasTest(parameterized.TestCase):
       try:
         import triton  # noqa: F401
       except ImportError:
-        if not _TRITON_COMPILE_VIA_XLA.value:
-          self.skipTest("Triton is not installed. Skipping PallasTest.")
+        if (
+            _TRITON_COMPILE_VIA_XLA is not None
+            and not _TRITON_COMPILE_VIA_XLA.value
+        ):
+          self.skipTest("Triton is not installed.")
     super().setUp()
     if compile_jaxpr:
       compile_jaxpr.cache_clear()
@@ -226,6 +233,19 @@ class PallasCallTest(PallasTest):
     for i in range(4):
       idx = jnp.arange(i, i + 2)
       np.testing.assert_allclose(index(x, idx), x[idx])
+
+  def test_num_programs(self):
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((4,), jnp.int32),
+        grid=4,
+    )
+    def kernel(o_ref):
+      o_ref[pl.program_id(0)] = pl.num_programs(0)
+
+    np.testing.assert_array_equal(
+        kernel(), np.asarray([4, 4, 4, 4], dtype=np.int32)
+    )
 
   def test_where_broadcasting(self):
     @functools.partial(
@@ -326,8 +346,10 @@ class PallasCallTest(PallasTest):
     if not self.check_gpu_capability_at_least(70):
       raise unittest.SkipTest(
           "Matmul only works on GPUs with capability >= sm70")
-    if not self.INTERPRET and (plgpu.get_compute_capability(0) <= 75
-        and (bm > 128 or bn > 128 or bk > 32)):
+    if not self.INTERPRET and (
+        plgpu.get_compute_capability(0) <= 75
+        and (bm >= 128 or bn > 128 or bk > 32)
+    ):
       raise unittest.SkipTest("Block sizes too big for sm70.")
     k1, k2 = random.split(random.key(0))
     x = random.normal(k1, (m, k), dtype=dtype)
@@ -353,8 +375,10 @@ class PallasCallTest(PallasTest):
     if not self.check_gpu_capability_at_least(70):
       raise unittest.SkipTest(
           "Matmul only works on GPUs with capability >= sm70")
-    if not self.INTERPRET and (plgpu.get_compute_capability(0) <= 75
-        and (bm > 128 or bn > 128 or bk > 32)):
+    if not self.INTERPRET and (
+        plgpu.get_compute_capability(0) <= 75
+        and (bm >= 128 or bn > 128 or bk > 32)
+    ):
       raise unittest.SkipTest("Block sizes too big for sm70.")
 
     k1, k2 = random.split(random.key(0))
@@ -364,15 +388,20 @@ class PallasCallTest(PallasTest):
                                       interpret=self.INTERPRET), jnp.matmul(x, y)
     np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
 
-  @parameterized.named_parameters(*(
-      dict(testcase_name=f"{size}_{dtype}", size=size, dtype=dtype)
-      for size in [16, 32, 64]
-      for dtype in ["float32", "float16"]
-  ))
-  def test_dot(self, size, dtype):
+  @parameterized.product(
+      size=[16, 32, 64],
+      dtype=["float32", "float16"],
+      trans_a=[False, True],
+      trans_b=[False, True],
+  )
+  def test_dot(self, size, dtype, trans_a, trans_b):
     if not self.check_gpu_capability_at_least(70):
       raise unittest.SkipTest(
           "Matmul only works on GPUs with capability >= sm70")
+    if trans_a or trans_b:
+      # TODO(slebedev): Remove this once the problematic Triton pass is fixed.
+      raise unittest.SkipTest(
+          "Triton crashes if any of the operands are transposed")
 
     @functools.partial(
         self.pallas_call,
@@ -381,7 +410,7 @@ class PallasCallTest(PallasTest):
     def dot(x_ref, y_ref, o_ref):
       x = x_ref[:, :]
       y = y_ref[:, :]
-      o_ref[:, :] = pl.dot(x, y).astype(o_ref.dtype)
+      o_ref[:, :] = pl.dot(x, y, trans_a, trans_b).astype(o_ref.dtype)
 
     k1, k2 = random.split(random.key(0))
     x = random.normal(k1, (size, size), dtype=dtype)
@@ -769,6 +798,8 @@ class PallasCallTest(PallasTest):
     (2, 1, 1),
   ])
   def test_atomic_cas(self, init_value, cmp, new_value):
+    if not self.check_gpu_capability_at_least(70):
+      raise unittest.SkipTest("requires a GPU with compute capability >= sm70")
 
     @functools.partial(
         self.pallas_call, out_shape=(
@@ -789,6 +820,10 @@ class PallasCallTest(PallasTest):
   def test_atomic_counter(self, num_threads):
     if self.INTERPRET:
       self.skipTest("While loop not supported in interpreter mode.")
+
+    if not self.check_gpu_capability_at_least(70):
+      raise unittest.SkipTest("requires a GPU compute capability >= sm70")
+
     @functools.partial(
         self.pallas_call, out_shape=(
           jax.ShapeDtypeStruct((), jnp.int32),
@@ -1491,7 +1526,7 @@ class PallasOpsTest(PallasTest):
       o_ref[()] = x_ref[()]**2.0
 
     x = jnp.array(42.0)
-    np.testing.assert_allclose(square(x), x**2.0)
+    np.testing.assert_allclose(square(x), x*x)
 
   def test_ne(self):
     @functools.partial(
