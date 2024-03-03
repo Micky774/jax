@@ -29,6 +29,7 @@ int CusolverGetVersion();
 int CublasGetVersion();
 int CusparseGetVersion();
 size_t CudnnGetVersion();
+int CudaComputeCapability(int);
 
 }  // namespace jax::cuda
 

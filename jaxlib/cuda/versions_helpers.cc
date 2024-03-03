@@ -83,6 +83,17 @@ size_t CudnnGetVersion() {
     throw std::runtime_error("cuDNN not found.");
   }
   return version;
+
+int CudaComputeCapability(int device) {
+    int major, minor;
+    GPU_RETURN_IF_ERROR(gpuInit(device));
+    GPU_RETURN_IF_ERROR(gpuDeviceGetAttribute(
+        &major, GPU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device));
+    GPU_RETURN_IF_ERROR(gpuDeviceGetAttribute(
+        &minor, GPU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device));
+    return major * 10 + minor;
+  }
+  ValueOrThrowWrapper();
 }
 
 }  // namespace jax::cuda
