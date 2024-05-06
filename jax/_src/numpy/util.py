@@ -18,14 +18,16 @@ from functools import partial
 import re
 import textwrap
 from typing import Any, Callable, NamedTuple, TypeVar
-
 import warnings
+
+from jax.sharding import Sharding
 
 from jax._src import api
 from jax._src import config
 from jax._src import core
 from jax._src import dtypes
 from jax._src.lax import lax
+from jax._src.lib import xla_client as xc
 from jax._src.util import safe_zip, safe_map
 from jax._src.typing import Array, ArrayLike, DimSize, DType, DTypeLike, Shape
 
@@ -115,6 +117,20 @@ def _parse_extra_params(extra_params: str) -> dict[str, str]:
   """Parse the extra parameters passed to implements()"""
   parameters = _parameter_break.split(extra_params.strip('\n'))
   return {p.partition(' : ')[0].partition(', ')[0]: p for p in parameters}
+
+
+def _place_array(x: Array, device: xc.Device | Sharding | None = None, copy=None) -> Array:
+  """Helper utility for copying an array, or placing it on a device or sharding.
+  """
+
+  if device is not None:
+    if copy is not None and not copy:
+      raise ValueError(
+        f"Specified {device=} which requires a copy, however copy=False. Set "
+        "copy=True or copy=None to perform the requested operation."
+      )
+    return api.device_put(x, device)
+  return lax._array_copy(x) if copy else x
 
 
 def implements(
