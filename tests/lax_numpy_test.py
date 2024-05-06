@@ -3873,14 +3873,21 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
   @jtu.sample_product(
     change_dtype=[True, False],
     copy=[True, False],
+    change_device=[True, False],
   )
-  def testAstypeCopy(self, change_dtype, copy):
+  @jtu.run_on_devices("gpu")
+  def testAstypeCopy(self, change_dtype, copy, change_device):
     dtype = 'float32' if change_dtype else 'int32'
-    expect_copy = change_dtype or copy
+    device = jax.devices("cpu")[0] if change_device else None
+    expect_copy = change_dtype or copy or change_device
     x = jnp.arange(5, dtype='int32')
-    y = x.astype(dtype, copy=copy)
-
+    y = x.astype(dtype, copy=copy, device=device)
     self.assertEqual(y.dtype, dtype)
+
+    placed_devices = y.devices()
+    expeceted_devices = {device} if change_device else x.devices()
+    self.assertEqual(placed_devices, expeceted_devices)
+
     y.delete()
     self.assertNotEqual(x.is_deleted(), expect_copy)
 

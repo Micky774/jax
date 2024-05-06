@@ -17,15 +17,17 @@ from collections.abc import Sequence
 from functools import partial
 import re
 import textwrap
-from typing import Any, Callable, NamedTuple, TypeVar
-
+from typing import Any, Callable, NamedTuple, TypeVar, Set
 import warnings
+
+from jax.sharding import Sharding
 
 from jax._src import api
 from jax._src import config
 from jax._src import core
 from jax._src import dtypes
 from jax._src.lax import lax
+from jax._src.lib import xla_client as xc
 from jax._src.util import safe_zip, safe_map
 from jax._src.typing import Array, ArrayLike, DimSize, DType, DTypeLike, Shape
 
@@ -115,6 +117,44 @@ def _parse_extra_params(extra_params: str) -> dict[str, str]:
   """Parse the extra parameters passed to implements()"""
   parameters = _parameter_break.split(extra_params.strip('\n'))
   return {p.partition(' : ')[0].partition(', ')[0]: p for p in parameters}
+
+
+def _get_device_set(x: ArrayLike | xc.Device | Sharding | None) -> Set[xc.Device] | None:
+  if x is None or isinstance(x, core.Tracer):
+    return None
+  elif isinstance(x, Sharding):
+    return x.device_set
+  elif isinstance(x, xc.Device):
+    return {x}
+  elif hasattr(x, "devices"):
+    return x.devices()
+  else:
+    raise ValueError(f"Attempted to get a device set from an unsupported type: {type(x)}")
+
+
+def _place_array(x: Array, device: xc.Device | Sharding | None = None, copy=None) -> Array:
+  """Helper utility for copying an array, or placing it on a device or sharding.
+
+  Note that `device_put` is regarded as a no-op under JIT compilation, so we
+  ensure array API device semantics compliance only under eager execution,
+  favoring JIT compilation performance over correctness in this case.
+  """
+
+  devices = _get_device_set(device)
+  src_devices = _get_device_set(x)
+  if devices is not None and src_devices != devices:
+    if copy is not None and not copy:
+      raise ValueError(
+        f"Specified {device=} which requires a copy since the source devices "
+        f"are {src_devices}, however copy=False. Set copy=True or "
+        "copy=None to perform the requested operation."
+      )
+    out = api.device_put(x, device)
+  else:
+    out = x
+  if copy:
+    return lax._array_copy(out)
+  return out
 
 
 def implements(
