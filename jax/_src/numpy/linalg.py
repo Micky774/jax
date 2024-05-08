@@ -874,8 +874,8 @@ def eigvalsh(a: ArrayLike, UPLO: str | None = 'L') -> Array:
   return w
 
 
-@partial(custom_jvp, nondiff_argnums=(1, 2))
-@partial(jit, static_argnames=('hermitian'))
+# TODO(micky774): deprecated 2024-5-7, remove rcond and warning after
+# deprecation expires.
 def pinv(a: ArrayLike, rtol: ArrayLike | None = None,
          hermitian: bool = False, *,
          rcond: ArrayLike | DeprecatedArg | None = DeprecatedArg()) -> Array:
@@ -919,11 +919,7 @@ def pinv(a: ArrayLike, rtol: ArrayLike | None = None,
     >>> jnp.allclose(a_pinv @ a, jnp.eye(2), atol=1E-4)
     Array(True, dtype=bool)
   """
-  # Uses same algorithm as
-  # https://github.com/numpy/numpy/blob/v1.17.0/numpy/linalg/linalg.py#L1890-L1979
-  check_arraylike("jnp.linalg.pinv", a)
-  arr, = promote_dtypes_inexact(jnp.asarray(a))
-  # TODO(micky774): deprecated 2024-5-7, remove after deprecation expires.
+
   if not isinstance(rcond, DeprecatedArg):
     rtol = rcond
     del rcond
@@ -933,35 +929,48 @@ def pinv(a: ArrayLike, rtol: ArrayLike | None = None,
       "warning, please use rtol instead.",
       DeprecationWarning, stacklevel=2
     )
+
+  return _pinv(a, rtol, hermitian)
+
+# TODO(micky774): deprecated 2024-5-7, rename rcond-->rtol and remove wrapper
+# after deprecation expires.
+@partial(custom_jvp, nondiff_argnums=(1, 2))
+@partial(jit, static_argnames=('hermitian'))
+def _pinv(a: ArrayLike, rcond: ArrayLike | None = None, hermitian: bool = False):
+  # Uses same algorithm as
+  # https://github.com/numpy/numpy/blob/v1.17.0/numpy/linalg/linalg.py#L1890-L1979
+  check_arraylike("jnp.linalg.pinv", a)
+  arr, = promote_dtypes_inexact(jnp.asarray(a))
   m, n = arr.shape[-2:]
   if m == 0 or n == 0:
     return jnp.empty(arr.shape[:-2] + (n, m), arr.dtype)
   arr = ufuncs.conj(arr)
-  if rtol is None:
+  if rcond is None:
     max_rows_cols = max(arr.shape[-2:])
-    rtol = 10. * max_rows_cols * jnp.array(jnp.finfo(arr.dtype).eps)
-  rtol = jnp.asarray(rtol)
+    rcond = 10. * max_rows_cols * jnp.array(jnp.finfo(arr.dtype).eps)
+  rcond = jnp.asarray(rcond)
   u, s, vh = svd(arr, full_matrices=False, hermitian=hermitian)
-  # Singular values less than or equal to ``rtol * largest_singular_value``
+  # Singular values less than or equal to ``rcond * largest_singular_value``
   # are set to zero.
-  rtol = lax.expand_dims(rtol[..., jnp.newaxis], range(s.ndim - rtol.ndim - 1))
-  cutoff = rtol * s[..., 0:1]
+  rcond = lax.expand_dims(rcond[..., jnp.newaxis], range(s.ndim - rcond.ndim - 1))
+  cutoff = rcond * s[..., 0:1]
   s = jnp.where(s > cutoff, s, jnp.inf).astype(u.dtype)
   res = jnp.matmul(vh.mT, ufuncs.divide(u.mT, s[..., jnp.newaxis]),
-                   precision=lax.Precision.HIGHEST)
+                  precision=lax.Precision.HIGHEST)
   return lax.convert_element_type(res, arr.dtype)
 
-
-@pinv.defjvp
+# TODO(micky774): deprecated 2024-5-7, rename rcond-->rtol and remove wrapper
+# after deprecation expires.
+@_pinv.defjvp
 @jax.default_matmul_precision("float32")
-def _pinv_jvp(rtol, hermitian, primals, tangents):
+def _pinv_jvp(rcond, hermitian, primals, tangents):
   # The Differentiation of Pseudo-Inverses and Nonlinear Least Squares Problems
   # Whose Variables Separate. Author(s): G. H. Golub and V. Pereyra. SIAM
   # Journal on Numerical Analysis, Vol. 10, No. 2 (Apr., 1973), pp. 413-432.
   # (via https://en.wikipedia.org/wiki/Moore%E2%80%93Penrose_inverse#Derivative)
   a, = primals  # m x n
   a_dot, = tangents
-  p = pinv(a, rtol=rtol, hermitian=hermitian)  # n x m
+  p = _pinv(a, rcond=rcond, hermitian=hermitian)  # n x m
   if hermitian:
     # svd(..., hermitian=True) symmetrizes its input, and the JVP must match.
     a = _symmetrize(a)

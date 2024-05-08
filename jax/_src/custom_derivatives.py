@@ -46,7 +46,6 @@ from jax._src.tree_util import (tree_flatten, tree_unflatten, tree_map,
                                 tree_flatten_with_path, keystr)
 from jax._src.util import (cache, safe_zip, safe_map, split_list, Unhashable,
                            unzip2)
-from jax._src.typing import DeprecatedArg
 
 
 traceback_util.register_exclusion(__file__)
@@ -61,18 +60,10 @@ def _resolve_kwargs(fun, args, kwargs):
   if isinstance(fun, partial):
     # functools.partial should have an opaque signature.
     fun = lambda *args, **kwargs: None
-  sig = inspect.signature(fun)
-  ba = sig.bind(*args, **kwargs)
+  ba = inspect.signature(fun).bind(*args, **kwargs)
   ba.apply_defaults()
-  unresolved_kwargs = [
-    k for k in ba.kwargs
-    if 'DeprecatedArg' not in sig.parameters[k].annotation
-  ]
-  if unresolved_kwargs:
-    raise TypeError(
-      "The following keyword arguments could not be resolved to positions: "
-      f"{unresolved_kwargs}"
-    )
+  if ba.kwargs:
+    raise TypeError("keyword arguments could not be resolved to positions")
   else:
     return ba.args
 
