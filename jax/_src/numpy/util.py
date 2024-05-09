@@ -121,6 +121,8 @@ def _parse_extra_params(extra_params: str) -> dict[str, str]:
 
 def _place_array(x: Array, device: xc.Device | Sharding | None = None, copy=None) -> Array:
   """Helper utility for copying an array, or placing it on a device or sharding.
+
+  This utility uses `jax.device_put` for device placement.
   """
 
   if device is not None:
